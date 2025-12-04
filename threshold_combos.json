@@ -1,0 +1,6 @@
+{
+  "AAPL": {
+    "sell_pct_thresh": 13.6,
+    "buy_pct_thresh": 1.6
+  }
+}
