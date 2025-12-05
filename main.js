@@ -64,9 +64,9 @@ function normalizeName(str) {
 }
 
 function isAfterDailyRefreshCutoff() {
-  // 2pm local time (PST for you)
+  // 1:35pm local time (PST for you)
   const now = new Date();
-  return now.getHours() >= 14;
+  return now.getHours() >= 13.55;
 }
 
 function loadSaved() {
@@ -158,11 +158,13 @@ function saveBestResult(symbol, result) {
     last_decision: result.last_decision,
     last_amount: result.last_amount,
     last_action_price: result.last_action_price,
+    lookback_days: result.lookback_days || MAX_LOOKBACK_DAYS, // 🔹 NEW
     favorite: prev.favorite === true
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
   renderSavedList();
 }
+
 
 function classifyItemForSort(item) {
   const decision = item.last_decision || "HOLD";
@@ -473,7 +475,9 @@ function biasedTrader(
     last_amount: lastAmount,
     last_action_price: lastActionPrice,
     last_price: finalPrice,
-    equity_curve: equityCurve
+    equity_curve: equityCurve,
+    // 🔹 NEW: remember which lookback was used
+    lookback_days: maxLookbackDays
   };
 }
 
@@ -487,41 +491,49 @@ async function gridSearchThresholdsWithProgress(prices, startWallet, onProgress)
     buyValues.push(v);
   }
 
-  const totalIters = sellValues.length * buyValues.length;
+  // 🔹 NEW: different lookback windows to try
+  const lookbackValues = [5, 10, 20, 30, 60];
+
+  const totalIters = sellValues.length * buyValues.length * lookbackValues.length;
   let count = 0;
   let lastPercentShown = -1;
 
   let bestProfit = -Infinity;
   let bestResult = null;
 
-  for (let si = 0; si < sellValues.length; si++) {
-    const sellThresh = sellValues[si];
-    for (let bi = 0; bi < buyValues.length; bi++) {
-      const buyThresh = buyValues[bi];
+  for (let li = 0; li < lookbackValues.length; li++) {
+    const lookback = lookbackValues[li];
 
-      count++;
-      const percent = Math.floor((count * 100) / totalIters);
-      if (onProgress && percent !== lastPercentShown) {
-        lastPercentShown = percent;
-        onProgress(percent);
-      }
+    for (let si = 0; si < sellValues.length; si++) {
+      const sellThresh = sellValues[si];
 
-      const res = biasedTrader(
-        prices,
-        startWallet,
-        sellThresh,
-        buyThresh,
-        MAX_LOOKBACK_DAYS,
-        false
-      );
+      for (let bi = 0; bi < buyValues.length; bi++) {
+        const buyThresh = buyValues[bi];
 
-      if (res.profit > bestProfit) {
-        bestProfit = res.profit;
-        bestResult = res;
-      }
+        count++;
+        const percent = Math.floor((count * 100) / totalIters);
+        if (onProgress && percent !== lastPercentShown) {
+          lastPercentShown = percent;
+          onProgress(percent);
+        }
 
-      if (count % 400 === 0) {
-        await new Promise((resolve) => requestAnimationFrame(resolve));
+        const res = biasedTrader(
+          prices,
+          startWallet,
+          sellThresh,
+          buyThresh,
+          lookback,
+          false
+        );
+
+        if (res.profit > bestProfit) {
+          bestProfit = res.profit;
+          bestResult = res; // res already carries lookback_days
+        }
+
+        if (count % 400 === 0) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
       }
     }
   }
@@ -529,6 +541,7 @@ async function gridSearchThresholdsWithProgress(prices, startWallet, onProgress)
   if (onProgress) onProgress(100);
   return bestResult;
 }
+
 
 function updateChart(symbol, dates, prices, equityCurve) {
   if (priceChart) {
@@ -630,16 +643,18 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
 
     if (saved && !forceReoptimize) {
       setProgress(20, "Using cached thresholds...");
+      const lookback = saved.lookback_days || MAX_LOOKBACK_DAYS;
       bestResult = biasedTrader(
         prices,
         START_WALLET,
         saved.sell_pct_thresh,
         saved.buy_pct_thresh,
-        MAX_LOOKBACK_DAYS,
+        lookback,
         true
       );
       bestResult.sell_pct_thresh = saved.sell_pct_thresh;
       bestResult.buy_pct_thresh = saved.buy_pct_thresh;
+      bestResult.lookback_days = lookback;
       setProgress(100, "Using cached thresholds");
     } else {
       setProgress(10, "Optimizing thresholds...");
@@ -651,14 +666,18 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
       if (!gridBest) throw new Error("No result from grid search.");
 
       // Re-run once with curve tracking enabled for the best combo
+      // Re-run once with curve tracking enabled for the best combo
+      const bestLookback = gridBest.lookback_days || MAX_LOOKBACK_DAYS;
       bestResult = biasedTrader(
         prices,
         START_WALLET,
         gridBest.sell_pct_thresh,
         gridBest.buy_pct_thresh,
-        MAX_LOOKBACK_DAYS,
+        bestLookback,
         true
       );
+      bestResult.lookback_days = bestLookback;
+
     }
 
     if (!bestResult) throw new Error("No result from simulation.");
@@ -690,9 +709,11 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
     thresholdsText.textContent = `Sell > ${bestResult.sell_pct_thresh.toFixed(
       1
     )}%, Buy drop > ${bestResult.buy_pct_thresh.toFixed(1)}%`;
-    thresholdsExtra.textContent = `Lookback up to ${MAX_LOOKBACK_DAYS} days | Start wallet $${START_WALLET.toFixed(
+    const usedLookback = bestResult.lookback_days || MAX_LOOKBACK_DAYS;
+    thresholdsExtra.textContent = `Lookback up to ${usedLookback} days | Start wallet $${START_WALLET.toFixed(
       2
     )}`;
+
 
     const profit = bestResult.profit;
     const finalValue = bestResult.final_value;
