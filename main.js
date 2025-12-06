@@ -656,17 +656,20 @@ function updateChart(symbol, dates, prices, equityCurve) {
   ];
 
   if (equityCurve && equityCurve.length === prices.length) {
-    const firstPrice = prices[0];
-    const firstVal = equityCurve[0] || 1;
-    const factor = firstVal !== 0 ? firstPrice / firstVal : 1;
-    const normalizedSim = equityCurve.map((v) => v * factor);
+    const normalizedSim = equityCurve.map((totalVal, idx) => {
+      const price = prices[idx];
+      if (!isFinite(totalVal) || !isFinite(price) || START_WALLET === 0) {
+        return null;
+      }
+      return (totalVal / START_WALLET) * price;
+    });
 
     datasets.push({
       label: "Simulation value",
       data: normalizedSim,
       borderWidth: 1.5,
       pointRadius: 0,
-      borderColor: "#22c55e", // green
+      borderColor: "#22c55e",
       backgroundColor: "rgba(34,197,94,0.15)",
       tension: 0.15
     });
