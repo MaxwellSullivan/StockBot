@@ -46,61 +46,63 @@ const profitExtra = document.getElementById("profit-extra");
 
 const chartCanvas = document.getElementById("chart");
 let priceChart = null;
-
-// Custom tooltip positioner: attaches to the simulation point
-// and switches sides once you cross the center of the chart
+// Custom tooltip positioner:
+//  - base position from Chart's built-in "average" positioner
+//  - y attached to Simulation value point
+//  - side chosen by data index (left half / right half)
 if (typeof Chart !== "undefined" && Chart.Tooltip && Chart.Tooltip.positioners) {
   Chart.Tooltip.positioners.dynamicSide = function (items, eventPosition) {
     const chart = this.chart;
-    const area = chart.chartArea;
-    const midX = (area.left + area.right) / 2;
-    const offset = 20;   // horizontal distance from the point
+    const data = chart.data || {};
+    const datasets = data.datasets || [];
+    const labels = data.labels || [];
+    const offset = 22; // horizontal distance from the point
 
-    // 1) Find the simulation point for this tooltip, or fall back to first item
-    let anchorItem = null;
-    if (items && items.length) {
-      anchorItem =
-        items.find(
-          (it) =>
-            it.dataset &&
-            it.dataset.label &&
-            it.dataset.label === "Simulation value"
-        ) || items[0];
-    }
+    if (!items || !items.length) return eventPosition;
 
-    const baseX = anchorItem && anchorItem.element
-      ? anchorItem.element.x
-      : eventPosition.x;
-    const baseY = anchorItem && anchorItem.element
-      ? anchorItem.element.y
-      : eventPosition.y;
+    // 1) Start from the built-in "average" tooltip position
+    const avgPos = Chart.Tooltip.positioners.average.call(this, items, eventPosition);
+    let baseX = avgPos.x;
+    let baseY = avgPos.y;
 
-    // 2) Decide which side to use, with a small buffer to prevent flicker
-    const margin = 8; // pixels around the center line where we DON'T flip
-    let side = chart.$tooltipSide || "right";
-
-    if (side === "right") {
-      // currently on the right side of the anchor (tooltip right of point)
-      if (baseX > midX + margin) {
-        side = "left";
-      }
-    } else {
-      // currently on the left side of the anchor
-      if (baseX < midX - margin) {
-        side = "right";
+    // 2) Find the Simulation value item (fallback: first item)
+    let simItem = items[0];
+    for (const it of items) {
+      const ds = datasets[it.datasetIndex];
+      if (ds && ds.label === "Simulation value") {
+        simItem = it;
+        break;
       }
     }
 
-    // If we have no previous side stored yet, pick based on which half we're in
-    if (!chart.$tooltipSide) {
-      side = baseX < midX ? "right" : "left";
-    }
-    chart.$tooltipSide = side;
+    // Attach Y to the Simulation point if possible
+    if (simItem.element) {
+      const el = simItem.element;
+      const pos =
+        typeof el.tooltipPosition === "function"
+          ? el.tooltipPosition(true)
+          : el;
 
-    // 3) Position tooltip at the simulation point, offset left/right
-    const x = baseX + (side === "right" ? offset : -offset);
+      if (pos && typeof pos.y === "number") {
+        baseY = pos.y;
+      }
+    }
+
+    // 3) Decide which side using the data index (no jitter, no pixels)
+    const maxIndex = labels.length > 0 ? labels.length - 1 : 0;
+    const midIndex = maxIndex / 2;
+    const idx =
+      simItem.dataIndex != null
+        ? simItem.dataIndex
+        : simItem.index != null
+        ? simItem.index
+        : 0;
+    
+    const side = idx <= midIndex ? "right" : "left";
+
+    // 4) Apply offset horizontally from that x position
+    const x = baseX;// + (side === "right" ? offset : -offset);
     const y = baseY;
-
     return { x, y };
   };
 }
@@ -1015,7 +1017,7 @@ function updateChart(
         },
 
         tooltip: {
-          position: "dynamicSide",   // 👈 use our custom positioner
+          position: "dynamicSide",   // 👈 important
           mode: "index",
           intersect: false,
           displayColors: false,
