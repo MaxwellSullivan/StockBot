@@ -212,16 +212,34 @@
       font-size: 0.78rem;
       color: #9ca3af;
     }
+    .saved-reload,
     .saved-delete {
       font-size: 0.8rem;
       cursor: pointer;
       color: #6b7280;
       user-select: none;
+      margin-left: 6px;
+    }
+    .saved-reload {
       position: relative;
-      top: 8px;
+      top: 1px;
+      transform: translateX(1px);
+    }
+    .saved-delete {
+      position: relative;
+      top: -1px;
+    }
+    .saved-reload:hover {
+      color: #22c55e;
     }
     .saved-delete:hover {
       color: #f97373;
+    }
+    .saved-icon-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0px;
     }
     .main-panel {
       flex: 1 1 auto;

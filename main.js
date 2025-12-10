@@ -1,5 +1,5 @@
 // ================== CONSTANTS ==================
-const START_WALLET = 4000.0;
+const START_WALLET = 5000.0;
 const MAX_LOOKBACK_DAYS = 30;
 const STORAGE_KEY = "biasTraderSavedV7";
 const PRICE_CACHE_KEY = "biasTraderPriceV7";
@@ -50,14 +50,38 @@ let priceChart = null;
 
 // Track which symbol is currently shown on the main chart
 let currentSymbol = null;
-
-// Progress ETA state
-let lastProgressPercent = 0;
-let lastProgressTime = null;
+// Progress & ETA state
+let currentProgressPercent = 0;    // internal 0–100
+let etaStartTime = null;           // when the bar first moved
+let etaStartDisplayPercent = 0;    // bar percent at that time (usually 0)
+let etaAvgMsPerPercent = null;     // smoothed *average* ms per 1% of the BAR
 let etaTimerId = null;
 let etaRemainingSec = null;
-let currentProgressPercent = 0;
-let etaTargetPercent = 15; // optimistic: assume ~15 "iterations"
+
+// Grid-search status message state
+const GRID_STATUS_MESSAGES = [
+  "Simulating wallets...",
+  "Optimizing your tendies...",
+  "Hacking your crypto (ethically)...",
+  "Asking the stonks gods for guidance...",
+  "Counting imaginary yachts...",
+  "Teaching your portfolio to moonwalk...",
+  "Backtesting bad decisions...",
+  "Wrangling volatile candles...",
+  "Bribing random number generators...",
+  "Optimizing diamond hands..."
+];
+
+let gridSearchMessageCount = 0;     // quirky messages since last numeric %
+let gridSearchNextPercentIn = 3;    // after 3–5 messages, show a percent line
+let lastGridStatusUpdateTime = 0;   // last time (ms) we changed the status line
+
+function resetGridSearchMessageInterval() {
+  gridSearchMessageCount = 0;
+  gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3);
+}
+
+resetGridSearchMessageInterval();
 
 if (typeof Chart !== "undefined" && Chart.Tooltip && Chart.Tooltip.positioners) {
   Chart.Tooltip.positioners.dynamicSide = function (items, eventPosition) {
@@ -123,56 +147,85 @@ function setStatus(msg, isError = false) {
 }
 
 function setProgress(percent, label) {
+  // Internal progress (0–100) from the pipeline / grid search
   const p = Math.max(0, Math.min(100, percent));
-  progressBar.style.width = p + "%";
-  progressText.textContent = label || `Progress: ${p}%`;
   currentProgressPercent = p;
+
+  // Map internal progress to displayed bar percent:
+  // 0–60 internal → 0–99 visual, 60–100 internal → hold at 99 until done.
+  let displayPercent;
+  if (p <= 0) {
+    displayPercent = 0;
+  } else if (p < 60) {
+    displayPercent = Math.round((p / 60) * 99);
+  } else if (p < 100) {
+    displayPercent = 99;
+  } else {
+    displayPercent = 100;
+  }
+  displayPercent = Math.max(0, Math.min(100, displayPercent));
+
+  // Update bar
+  if (progressBar) {
+    progressBar.style.width = displayPercent + "%";
+  }
 
   const now =
     typeof performance !== "undefined" && performance.now
       ? performance.now()
       : Date.now();
 
-  if (p > 0 && p < 100) {
-    // Optimistic ETA:
-    // - Start by assuming we'll finish around 15% progress.
-    // - If we pass that, bump the target up by +5% (20, 25, 30, ...).
-    if (p > etaTargetPercent && etaTargetPercent < 100) {
-      while (p > etaTargetPercent && etaTargetPercent < 100) {
-        etaTargetPercent += 5;
+  // ===== ETA based on *average* speed of the BAR =====
+  if (displayPercent > 0 && displayPercent < 100) {
+    // New run or bar went backwards → reset baseline
+    if (etaStartTime === null || displayPercent < etaStartDisplayPercent) {
+      etaStartTime = now;
+      etaStartDisplayPercent = displayPercent;
+      etaAvgMsPerPercent = null;
+      etaRemainingSec = null;
+    } else if (displayPercent > etaStartDisplayPercent) {
+      const elapsedMs = now - etaStartTime;
+      const progressed = displayPercent - etaStartDisplayPercent;
+
+      if (progressed > 0 && elapsedMs > 0) {
+        // Raw average speed from start of the run
+        const rawMsPerPercent = elapsedMs / progressed;
+
+        // Smooth it heavily so it doesn't jump around
+        if (etaAvgMsPerPercent == null) {
+          etaAvgMsPerPercent = rawMsPerPercent;
+        } else {
+          const alphaSpeed = 0.15; // 15% new, 85% old
+          etaAvgMsPerPercent =
+            etaAvgMsPerPercent * (1 - alphaSpeed) +
+            rawMsPerPercent * alphaSpeed;
+        }
+
+        const remainingPercent = Math.max(100 - displayPercent, 0);
+        const rawRemainingSec = (etaAvgMsPerPercent * remainingPercent) / 1000;
+
+        // Also smooth the displayed remaining time itself so drops/bumps are gentle
+        if (etaRemainingSec == null) {
+          etaRemainingSec = Math.round(rawRemainingSec);
+        } else {
+          const alphaEta = 0.2; // 20% new value each update
+          const smoothed =
+            etaRemainingSec * (1 - alphaEta) + rawRemainingSec * alphaEta;
+          etaRemainingSec = Math.max(0, Math.round(smoothed));
+        }
       }
     }
 
-    if (lastProgressTime != null && p > lastProgressPercent) {
-      const deltaP = p - lastProgressPercent;
-      const deltaT = now - lastProgressTime;
-
-      if (deltaP > 0 && deltaT > 0) {
-        const msPerPercent = deltaT / deltaP;
-
-        const remainingPercent = Math.max(etaTargetPercent - p, 0);
-        const remainingMs = msPerPercent * (remainingPercent || 1);
-
-        etaRemainingSec = Math.max(0, Math.round(remainingMs / 1000));
-      }
-    }
-
-    lastProgressTime = now;
-    lastProgressPercent = p;
-
+    // Show ETA text
     if (etaText) {
-      if (
-        etaRemainingSec != null &&
-        isFinite(etaRemainingSec) &&
-        etaRemainingSec > 0
-      ) {
+      if (etaRemainingSec != null && isFinite(etaRemainingSec) && etaRemainingSec > 0) {
         etaText.textContent = `Estimated remaining time: ${etaRemainingSec}s`;
       } else {
         etaText.textContent = "";
       }
     }
 
-    // Start a countdown timer if not already running
+    // Countdown timer that decrements etaRemainingSec once per second
     if (!etaTimerId && etaText) {
       etaTimerId = setInterval(() => {
         if (currentProgressPercent >= 100 || etaRemainingSec == null) {
@@ -196,11 +249,11 @@ function setProgress(percent, label) {
       }, 1000);
     }
   } else {
-    // When idle or finished, reset ETA
-    lastProgressTime = now;
-    lastProgressPercent = p;
+    // Finished or reset (bar at 0 or 100)
+    etaStartTime = null;
+    etaStartDisplayPercent = 0;
+    etaAvgMsPerPercent = null;
     etaRemainingSec = null;
-    etaTargetPercent = 15; // back to optimistic default
 
     if (etaText) {
       etaText.textContent = "";
@@ -208,6 +261,56 @@ function setProgress(percent, label) {
     if (etaTimerId) {
       clearInterval(etaTimerId);
       etaTimerId = null;
+    }
+
+    // Reset quirky-message cadence when run ends
+    gridSearchMessageCount = 0;
+    lastGridStatusUpdateTime = 0;
+    gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3); // 3–5
+  }
+
+  // ===== Status / progress text =====
+  const isGridSearch =
+    typeof label === "string" && label.toLowerCase().includes("grid search");
+
+  // Non-grid operations: label + BAR percent
+  if (!isGridSearch) {
+    const baseLabel = label || "Progress";
+    if (progressText) {
+      progressText.textContent = `${baseLabel} (${displayPercent}%)`;
+    }
+    return;
+  }
+
+  // Grid-search status: only change message every ≥ 3s
+  if (!GRID_STATUS_MESSAGES.length) {
+    if (progressText) {
+      progressText.textContent = `Grid search: ${displayPercent}%`;
+    }
+    return;
+  }
+
+  const timeSinceLast = now - (lastGridStatusUpdateTime || 0);
+  const isFinal = displayPercent >= 100;
+
+  if (isFinal || timeSinceLast >= 3000) {
+    lastGridStatusUpdateTime = now;
+
+    let text;
+    if (gridSearchMessageCount >= gridSearchNextPercentIn || isFinal) {
+      // Every 3–5 updates (or at the end), show numeric progress
+      text = `Grid search: ${displayPercent}%`;
+      gridSearchMessageCount = 0;
+      gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3); // 3–5
+    } else {
+      // Otherwise show a quirky message
+      const idx = Math.floor(Math.random() * GRID_STATUS_MESSAGES.length);
+      text = GRID_STATUS_MESSAGES[idx] || "Simulating...";
+      gridSearchMessageCount++;
+    }
+
+    if (progressText) {
+      progressText.textContent = text;
     }
   }
 }
@@ -428,22 +531,28 @@ function renderSavedList() {
           <div class="saved-symbol">${sym}</div>
           <div class="saved-profit-cell"
                style="display:flex; justify-content:flex-end; align-items:center;">
-            <!-- TOP RIGHT: price -->
-            <span class="saved-last-price" style="margin-right:4px;">
+            <!-- TOP RIGHT: price + reload -->
+            <span class="saved-last-price">
               $${lastPrice.toFixed(2)}
             </span>
-            <span class="saved-delete" data-symbol="${sym}" title="Remove ${sym}">✕</span>
+            <span class="saved-reload"
+                  data-symbol="${sym}"
+                  title="Re-run simulation for ${sym}">⟳</span>
           </div>
+
           <!-- row 2 -->
           <div class="saved-decision" style="color:${decisionColor};">
             ${decisionLabel}
           </div>
           <div class="saved-last-price-cell"
                style="display:flex; justify-content:flex-end; align-items:center;">
-            <!-- BOTTOM RIGHT: % change -->
-            <span class="saved-profit ${profitClass}" style="margin-right:14px;">
+            <!-- BOTTOM RIGHT: % change + delete -->
+            <span class="saved-profit ${profitClass}">
               ${profitPctText}
             </span>
+            <span class="saved-delete"
+                  data-symbol="${sym}"
+                  title="Remove ${sym}">✕</span>
           </div>
         </div>
       </button>
@@ -884,14 +993,13 @@ async function gridSearchThresholdsWithProgress(
   const longTermRatios = [0.0, 0.25, 0.5];
   const longTermHoldDays = [0, 10, 20];
 
-  // NEW: range of starting wallets to test
-  const walletValues = [];
-  for (let w = 100; w <= 10000; w += 100) {
-    walletValues.push(w);
-  }
+  // ----- binary-search-style wallet optimization -----
+  const MIN_WALLET = 100;
+  const MAX_WALLET = 10000;
+  const WALLET_STEP = 100;      // resolution ≈ $100
+  const MAX_WALLET_EVALS = 30;  // rough upper bound per param set
 
-  const totalIters =
-    walletValues.length *
+  const totalParamCombos =
     sellValues.length *
     buyValues.length *
     positionScales.length *
@@ -899,80 +1007,190 @@ async function gridSearchThresholdsWithProgress(
     longTermRatios.length *
     longTermHoldDays.length;
 
+  const totalIters = totalParamCombos * MAX_WALLET_EVALS;
+
   let count = 0;
-  let lastPercentShown = -1;
-
+  let lastPercentShown = 0;
   let bestProfitPct = -Infinity;
-  let lastbestProfitPct = bestProfitPct;
-  let loopCounter = 0;
   let bestResult = null;
-  for (const wallet of walletValues) {
-    loopCounter += 1;
-    if (loopCounter > 10) break;
-    if (bestProfitPct != lastbestProfitPct) {
-      lastbestProfitPct = bestProfitPct;
-      loopCounter = 0;
+
+  function snapWallet(w) {
+    let snapped = Math.round(w / WALLET_STEP) * WALLET_STEP;
+    if (snapped < MIN_WALLET) snapped = MIN_WALLET;
+    if (snapped > MAX_WALLET) snapped = MAX_WALLET;
+    return snapped;
+  }
+
+  async function registerEvalProgress() {
+    count++;
+    const percent = Math.min(99, Math.floor((count * 100) / totalIters));
+    if (onProgress && percent !== lastPercentShown) {
+      lastPercentShown = percent;
+      onProgress(percent);
     }
-    console.log(bestProfitPct);
-    for (const sellThresh of sellValues) {
-      for (const buyThresh of buyValues) {
-        for (const posScale of positionScales) {
-          for (const minHold of shortMinHolds) {
-            for (const ltRatio of longTermRatios) {
-              for (const ltHold of longTermHoldDays) {
-                count++;
-                const percent = Math.floor((count * 100) / totalIters);
-                if (onProgress && percent !== lastPercentShown) {
-                  lastPercentShown = percent;
-                  onProgress(percent);
-                }
 
-                const res = biasedTrader(
-                  prices,
-                  wallet,
-                  sellThresh,
-                  buyThresh,
-                  MAX_LOOKBACK_DAYS,
-                  {
-                    positionScale: posScale,
-                    minHoldDays: minHold,
-                    longTermRatio: ltRatio,
-                    longTermMinHoldDays: ltHold
-                  }
-                );
+    if (count % 400 === 0) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  }
 
-                const profit = res.profit;
-                const profitPct =
-                  wallet > 0 && isFinite(wallet)
-                    ? (profit / wallet) * 100
-                    : -Infinity;
+  async function evalWallet(
+    wallet,
+    sellThresh,
+    buyThresh,
+    posScale,
+    minHold,
+    ltRatio,
+    ltHold
+  ) {
+    const w = snapWallet(wallet);
 
-                if (profitPct > bestProfitPct) {
-                  bestProfitPct = profitPct;
-                  bestResult = {
-                    ...res,
-                    sell_pct_thresh: sellThresh,
-                    buy_pct_thresh: buyThresh,
-                    position_scale: posScale,
-                    min_hold_days: minHold,
-                    long_term_ratio: ltRatio,
-                    long_term_min_hold_days: ltHold,
-                    start_wallet: wallet
-                  };
-                }
+    await registerEvalProgress();
 
-                if (count % 400 === 0) {
-                  await new Promise((resolve) =>
-                    requestAnimationFrame(resolve)
-                  );
-                }
-              }
+    const res = biasedTrader(prices, w, sellThresh, buyThresh, MAX_LOOKBACK_DAYS, {
+      positionScale: posScale,
+      minHoldDays: minHold,
+      longTermRatio: ltRatio,
+      longTermMinHoldDays: ltHold
+    });
+
+    const profit = res.profit;
+    const profitPct =
+      w > 0 && isFinite(w) ? (profit / w) * 100 : -Infinity;
+
+    if (profitPct > bestProfitPct) {
+      console.log(Math.round(profitPct), w);
+      bestProfitPct = profitPct;
+      bestResult = {
+        ...res,
+        sell_pct_thresh: sellThresh,
+        buy_pct_thresh: buyThresh,
+        position_scale: posScale,
+        min_hold_days: minHold,
+        long_term_ratio: ltRatio,
+        long_term_min_hold_days: ltHold,
+        start_wallet: w
+      };
+    }
+
+    return profitPct;
+  }
+
+  async function searchBestWalletForParams(
+    sellThresh,
+    buyThresh,
+    posScale,
+    minHold,
+    ltRatio,
+    ltHold
+  ) {
+    let low = MIN_WALLET;
+    let high = MAX_WALLET;
+
+    // start in the middle of the range
+    let mid = (low + high) / 2;
+    let bestWallet = snapWallet(mid);
+    let bestPct = await evalWallet(
+      bestWallet,
+      sellThresh,
+      buyThresh,
+      posScale,
+      minHold,
+      ltRatio,
+      ltHold
+    );
+
+    const MAX_ITERS = 10;            // max binary-search steps
+    const MAX_NO_IMPROVEMENT = 3;    // stop after 3 steps with no better profit
+    let noImprovementCount = 0;
+
+    for (let iter = 0; iter < MAX_ITERS && high - low > 2 * WALLET_STEP; iter++) {
+      const beforeBestPct = bestPct; // remember current best for this param combo
+
+      const left = (low + mid) / 2;   // e.g. 2.5k when mid is 5k
+      const right = (mid + high) / 2; // e.g. 7.5k when mid is 5k
+
+      const leftPct = await evalWallet(
+        left,
+        sellThresh,
+        buyThresh,
+        posScale,
+        minHold,
+        ltRatio,
+        ltHold
+      );
+      const rightPct = await evalWallet(
+        right,
+        sellThresh,
+        buyThresh,
+        posScale,
+        minHold,
+        ltRatio,
+        ltHold
+      );
+
+      // pick the best of left / mid / right and shrink around it
+      if (leftPct >= bestPct && leftPct >= rightPct) {
+        // best is on the left side
+        high = mid;
+        mid = left;
+        bestPct = leftPct;
+        bestWallet = snapWallet(left);
+      } else if (rightPct >= bestPct && rightPct >= leftPct) {
+        // best is on the right side
+        low = mid;
+        mid = right;
+        bestPct = rightPct;
+        bestWallet = snapWallet(right);
+      } else {
+        // middle is still best -> narrow around it
+        low = left;
+        high = right;
+        // mid stays where it is, bestPct unchanged
+      }
+
+      // === early stop: no better wallet for 3 binary steps ===
+      if (bestPct <= beforeBestPct + 1e-9) {
+        noImprovementCount++;
+        if (noImprovementCount >= MAX_NO_IMPROVEMENT) {
+          break;
+        }
+      } else {
+        noImprovementCount = 0; // reset streak if we found an improvement
+      }
+    }
+
+    // Final sweep around the best wallet (≈ ±$300) in $100 steps
+    const sweepLow = Math.max(MIN_WALLET, bestWallet - 300);
+    const sweepHigh = Math.min(MAX_WALLET, bestWallet + 300);
+    for (let w = sweepLow; w <= sweepHigh; w += WALLET_STEP) {
+      await evalWallet(w, sellThresh, buyThresh, posScale, minHold, ltRatio, ltHold);
+    }
+  }
+
+  // ----- loop over all threshold combinations, binary-searching wallet each time -----
+  for (const sellThresh of sellValues) {
+    for (const buyThresh of buyValues) {
+      for (const posScale of positionScales) {
+        for (const minHold of shortMinHolds) {
+          for (const ltRatio of longTermRatios) {
+            for (const ltHold of longTermHoldDays) {
+              await searchBestWalletForParams(
+                sellThresh,
+                buyThresh,
+                posScale,
+                minHold,
+                ltRatio,
+                ltHold
+              );
             }
           }
         }
       }
     }
   }
+
+  // make sure the progress bar finishes
   onProgress(100);
 
   return bestResult;
@@ -1335,6 +1553,10 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
   thresholdsExtra.textContent = "";
   profitText.textContent = "–";
   profitExtra.textContent = "";
+  const runStartTime =
+    typeof performance !== "undefined" && performance.now
+      ? performance.now()
+      : Date.now();
 
   try {
     // resolve symbol (name → symbol, or use raw if it already looks like a ticker)
@@ -1505,11 +1727,20 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
       2
     )} (wallet + holdings)`;
 
-    // ---------- SAVE & REFRESH SAVED LIST ----------
+        // ---------- SAVE & REFRESH SAVED LIST ----------
     saveBestResult(symbol, bestResult);
     renderSavedList();
 
-    setStatus("Done");
+    // how long did the whole run take?
+    const runEndTime =
+      typeof performance !== "undefined" && performance.now
+        ? performance.now()
+        : Date.now();
+    const elapsedSec = Math.round((runEndTime - runStartTime) / 1000);
+    const elapsedText =
+      elapsedSec >= 10 ? elapsedSec.toFixed(1) : elapsedSec.toFixed(2);
+
+    setStatus(`Done in ${elapsedText}s`);
     input.value = "";
   } catch (err) {
     console.error(err);
@@ -1537,7 +1768,19 @@ runButton.addEventListener("click", () => {
 });
 
 savedList.addEventListener("click", (e) => {
-  // If the X was clicked, delete that symbol
+  // Reload button: re-run simulation from scratch (ignore cached thresholds)
+  const reload = e.target.closest(".saved-reload");
+  if (reload) {
+    const sym = reload.dataset.symbol;
+    if (sym) {
+      input.value = sym;
+      runForInput(sym, { forceReoptimize: true });
+    }
+    e.stopPropagation();
+    return;
+  }
+
+  // Delete button: remove symbol
   const del = e.target.closest(".saved-delete");
   if (del) {
     const sym = del.dataset.symbol;
@@ -1551,17 +1794,15 @@ savedList.addEventListener("click", (e) => {
     return;
   }
 
-  // Otherwise, clicking the row runs the simulation
+  // Click anywhere else on the row → load + run (using cached thresholds if present)
   const btn = e.target.closest(".saved-btn");
   if (!btn) return;
 
   const sym = btn.dataset.symbol;
   if (!sym) return;
 
-  // If this symbol is already selected, don't re-run / redraw
   if (currentSymbol && sym.toUpperCase() === currentSymbol.toUpperCase()) {
-    // already showing this stock; do nothing
-    return;
+    return; // already selected
   }
 
   input.value = sym;
