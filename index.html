@@ -1,16 +1,15 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Stock Decision Bot</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- Charts -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- Zoom / pan plugin (used for main chart, optional) -->
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
-
-  <style>
+<meta charset="utf-8"/>
+<title>Stock Decision Bot</title>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<!-- Charts -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- Zoom / pan plugin (used for main chart, optional) -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
+<style>
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #0b1020;
@@ -401,67 +400,104 @@
     #pf-chart-portfolio {
       max-height: 260px;
     }
-  </style>
+  
+    /* ---- Quick / Precise segmented toggle (pill) ---- */
+    .segmented-toggle {
+      display: inline-flex;
+      align-items: center;
+      background: #4f46e5;
+      border-radius: 999px;
+      padding: 4px;
+      gap: 4px;
+      box-shadow: 0 10px 22px rgba(124, 58, 237, 0.30);
+      user-select: none;
+    }
+    .segmented-toggle input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .segmented-toggle label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 0.85rem;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+      color: #ffffff;
+      transition: background 0.15s ease, color 0.15s ease, transform 0.05s ease;
+    }
+    .segmented-toggle input:checked + label {
+      background: #ffffff;
+      color: #4f46e5;
+      box-shadow: 0 6px 14px rgba(0,0,0,0.20);
+    }
+    .segmented-toggle label:active {
+      transform: translateY(1px);
+    }
+    .segmented-toggle input:focus-visible + label {
+      outline: 2px solid rgba(255,255,255,0.9);
+      outline-offset: 2px;
+    }
+
+</style>
 </head>
 <body>
-  <!-- Primary UI box -->
-  <div class="container">
-    <h1>Stock Decision Bot</h1>
-    <div class="subtitle">
+<!-- Primary UI box -->
+<div class="container">
+<h1>Stock Decision Bot</h1>
+<div class="subtitle">
       Enter a symbol or company name &amp; it will find the best recommendation to earn the most profit
     </div>
-
-    <form id="symbol-form">
-      <label for="symbol-input">Symbol / Name:</label>
-      <input id="symbol-input" type="text" placeholder="e.g. NVDA or Apple" required />
-      <button type="submit" id="run-button">Run</button>
-    </form>
-
-    <div id="status" class="status"></div>
-
-    <div class="progress-wrapper">
-      <div id="progress-bar" class="progress-bar"></div>
-    </div>
-    <div id="progress-text" class="progress-text">Idle</div>
-    <div id="eta-text" class="progress-text eta-text"></div>
-
-    <div class="layout">
-      <!-- Left: saved symbols -->
-      <aside class="sidebar">
-        <div class="sidebar-header">
-          <div class="sidebar-title">Saved symbols</div>
-          <button type="button" class="saved-clear-btn" id="clear-saved">Clear</button>
-        </div>
-        <div class="saved-scroll" id="saved-list"></div>
-      </aside>
-
-      <!-- Right: main chart + cards -->
-      <section class="main-panel">
-        <canvas id="chart"></canvas>
-
-        <div class="card-row">
-          <div class="card">
-            <div class="card-title">Recommendation</div>
-            <div class="card-main" id="decision-text">–</div>
-            <div class="card-sub" id="decision-extra"></div>
-          </div>
-          <div class="card">
-            <div class="card-title">Best Thresholds</div>
-            <div class="card-main" id="thresholds-text">–</div>
-            <div class="card-sub" id="thresholds-extra"></div>
-          </div>
-          <div class="card">
-            <div class="card-title">Simulation Result</div>
-            <div class="card-main" id="profit-text">–</div>
-            <div class="card-sub" id="profit-extra"></div>
-          </div>
-        </div>
-      </section>
-    </div>
-  </div>
-
-  <!-- Second root box: Sandbox -->
-  <!-- <div class="container">
+<form id="symbol-form">
+<label for="symbol-input">Symbol / Name:</label>
+<input id="symbol-input" placeholder="e.g. NVDA or Apple" required="" type="text"/>
+<button id="run-button" type="submit">Run</button><div aria-label="Run mode" class="segmented-toggle" id="mode-seg" role="group"><input checked="checked" id="mode-quick" name="run-mode" type="radio" value="quick"/><label for="mode-quick">Quick</label><input id="mode-precise" name="run-mode" type="radio" value="precise"/><label for="mode-precise">Precise</label></div>
+</form>
+<div class="status" id="status"></div>
+<div class="progress-wrapper">
+<div class="progress-bar" id="progress-bar"></div>
+</div>
+<div class="progress-text" id="progress-text">Idle</div>
+<div class="progress-text eta-text" id="eta-text"></div>
+<div class="layout">
+<!-- Left: saved symbols -->
+<aside class="sidebar">
+<div class="sidebar-header">
+<div class="sidebar-title">Saved symbols</div>
+<button class="saved-clear-btn" id="clear-saved" type="button">Clear</button>
+</div>
+<div class="saved-scroll" id="saved-list"></div>
+</aside>
+<!-- Right: main chart + cards -->
+<section class="main-panel">
+<canvas id="chart"></canvas>
+<div class="card-row">
+<div class="card">
+<div class="card-title">Recommendation</div>
+<div class="card-main" id="decision-text">–</div>
+<div class="card-sub" id="decision-extra"></div>
+</div>
+<div class="card">
+<div class="card-title">Best Thresholds</div>
+<div class="card-main" id="thresholds-text">–</div>
+<div class="card-sub" id="thresholds-extra"></div>
+</div>
+<div class="card">
+<div class="card-title">Simulation Result</div>
+<div class="card-main" id="profit-text">–</div>
+<div class="card-sub" id="profit-extra"></div>
+</div>
+</div>
+</section>
+</div>
+</div>
+<!-- Second root box: Sandbox -->
+<!-- <div class="container">
     <h1>Sandbox</h1>
     <div class="subtitle">
       Experiment with a portfolio using a shared wallet, and compare your inputs with an optimized strategy.
@@ -508,8 +544,7 @@
       </div>
     </div>
   </div> -->
-
-  <!-- App logic -->
-  <script src="main.js"></script>
+<!-- App logic -->
+<script src="main.js"></script>
 </body>
 </html>

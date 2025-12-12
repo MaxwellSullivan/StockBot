@@ -1,5 +1,21 @@
 // ================== CONSTANTS ==================
 const START_WALLET = 5000.0;
+
+const MODE_STORAGE_KEY = "stockbot_mode";
+const MODE_QUICK = "quick";
+const MODE_PRECISE = "precise";
+
+// Quick mode runs a single simulation using this fixed starting wallet:
+const QUICK_START_WALLET = 4000.0;
+
+
+// Regime / mean-reversion scaling (helps avoid buying tiny dips after huge run-ups,
+// and buys more aggressively after large multi-day dips)
+const REGIME_SENS_DEFAULT = 1.0;     // 0 disables; 1 = normal; >1 stronger
+const REGIME_WINDOW_DAYS = 10;       // rolling min/max window
+const REGIME_TREND_DAYS = 7;         // multi-day trend window
+const REGIME_RANGE_PCT = 20;         // range% needed to consider a move "huge"
+
 const MAX_LOOKBACK_DAYS = 30;
 const STORAGE_KEY = "biasTraderSavedV7";
 const PRICE_CACHE_KEY = "biasTraderPriceV7";
@@ -30,6 +46,115 @@ const form = document.getElementById("symbol-form");
 const input = document.getElementById("symbol-input");
 const runButton = document.getElementById("run-button");
 
+
+
+/**
+ * Mode toggle UI (Quick vs Precise)
+ * - Quick: single run with QUICK_START_WALLET
+ * - Precise: current behavior (grid search + wallet evals) when not cached
+ */
+function getSelectedMode() {
+  const q = document.getElementById("mode-quick");
+  const p = document.getElementById("mode-precise");
+  if (q && p) return q.checked ? MODE_QUICK : MODE_PRECISE;
+
+  // backward-compat: older checkbox toggle
+  const el = document.getElementById("mode-toggle");
+  if (el) return el.checked ? MODE_QUICK : MODE_PRECISE;
+
+  const saved = localStorage.getItem(MODE_STORAGE_KEY);
+  return saved === MODE_PRECISE ? MODE_PRECISE : MODE_QUICK;
+}
+
+function setSelectedMode(mode) {
+  const m = mode === MODE_PRECISE ? MODE_PRECISE : MODE_QUICK;
+  localStorage.setItem(MODE_STORAGE_KEY, m);
+
+  // Preferred DOM: segmented radios
+  const q = document.getElementById("mode-quick");
+  const p = document.getElementById("mode-precise");
+  if (q && p) {
+    q.checked = m === MODE_QUICK;
+    p.checked = m === MODE_PRECISE;
+    return;
+  }
+
+  // backward-compat: older checkbox toggle
+  const el = document.getElementById("mode-toggle");
+  const lbl = document.getElementById("mode-toggle-label");
+  if (el) el.checked = m === MODE_QUICK;
+  if (lbl) lbl.textContent = m === MODE_QUICK ? "Quick" : "Precise";
+}
+
+function ensureModeToggle() {
+  // If the HTML already has the segmented control, just wire it up.
+  const q = document.getElementById("mode-quick");
+  const p = document.getElementById("mode-precise");
+  if (q && p) {
+    q.addEventListener("change", () => setSelectedMode(MODE_QUICK));
+    p.addEventListener("change", () => setSelectedMode(MODE_PRECISE));
+    // Default to Quick unless user previously chose Precise
+    setSelectedMode(getSelectedMode());
+    return;
+  }
+
+  // backward-compat: older checkbox toggle already exists
+  if (document.getElementById("mode-toggle")) {
+    setSelectedMode(getSelectedMode());
+    return;
+  }
+
+  // Fallback: inject a segmented control next to the Run button
+  if (!runButton || !runButton.parentNode) return;
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.alignItems = "center";
+  wrap.style.gap = "10px";
+
+  const parent = runButton.parentNode;
+  parent.insertBefore(wrap, runButton);
+  wrap.appendChild(runButton);
+
+  const seg = document.createElement("div");
+  seg.className = "segmented-toggle";
+  seg.id = "mode-seg";
+  seg.setAttribute("role", "group");
+  seg.setAttribute("aria-label", "Run mode");
+
+  const inputQ = document.createElement("input");
+  inputQ.type = "radio";
+  inputQ.id = "mode-quick";
+  inputQ.name = "run-mode";
+  inputQ.value = "quick";
+
+  const labelQ = document.createElement("label");
+  labelQ.setAttribute("for", "mode-quick");
+  labelQ.textContent = "Quick";
+
+  const inputP = document.createElement("input");
+  inputP.type = "radio";
+  inputP.id = "mode-precise";
+  inputP.name = "run-mode";
+  inputP.value = "precise";
+
+  const labelP = document.createElement("label");
+  labelP.setAttribute("for", "mode-precise");
+  labelP.textContent = "Precise";
+
+  seg.appendChild(inputQ);
+  seg.appendChild(labelQ);
+  seg.appendChild(inputP);
+  seg.appendChild(labelP);
+
+  wrap.appendChild(seg);
+
+  inputQ.addEventListener("change", () => setSelectedMode(MODE_QUICK));
+  inputP.addEventListener("change", () => setSelectedMode(MODE_PRECISE));
+
+  setSelectedMode(getSelectedMode());
+}
+
 const statusEl = document.getElementById("status");
 const progressBar = document.getElementById("progress-bar");
 const progressText = document.getElementById("progress-text");
@@ -42,6 +167,9 @@ const decisionText = document.getElementById("decision-text");
 const decisionExtra = document.getElementById("decision-extra");
 const thresholdsText = document.getElementById("thresholds-text");
 const thresholdsExtra = document.getElementById("thresholds-extra");
+
+
+ensureModeToggle();
 const profitText = document.getElementById("profit-text");
 const profitExtra = document.getElementById("profit-extra");
 
@@ -330,6 +458,10 @@ function clamp(val, min, max) {
 }
 
 async function fetchJson(url) {
+  // Log every network call (helps diagnose API quota usage)
+  try {
+    console.log(`[API CALL] ${new Date().toISOString()} -> ${url}`);
+  } catch (_) {}
   const resp = await fetch(url);
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status}`);
@@ -427,12 +559,81 @@ function savePriceCache(symbol, dates, prices) {
 }
 
 // ================== LOCAL STORAGE: SAVED RESULTS ==================
+
 function loadSaved() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") return parsed;
+    if (parsed && typeof parsed === "object") {
+      // ---- migrate legacy single-mode saves to modes.precise ----
+      let changed = false;
+      for (const sym of Object.keys(parsed)) {
+        const rec = parsed[sym];
+        if (!rec || typeof rec !== "object") continue;
+
+        if (!rec.modes) rec.modes = {};
+
+        // Legacy format: thresholds at top-level -> treat as Precise cache
+        const hasLegacyThresholds =
+          typeof rec.sell_pct_thresh === "number" &&
+          isFinite(rec.sell_pct_thresh) &&
+          typeof rec.buy_pct_thresh === "number" &&
+          isFinite(rec.buy_pct_thresh);
+
+        if (hasLegacyThresholds && !rec.modes[MODE_PRECISE]) {
+          rec.modes[MODE_PRECISE] = {
+            symbol: (rec.symbol || sym).toUpperCase(),
+            start_wallet:
+              typeof rec.start_wallet === "number" && isFinite(rec.start_wallet)
+                ? rec.start_wallet
+                : START_WALLET,
+            sell_pct_thresh: rec.sell_pct_thresh,
+            buy_pct_thresh: rec.buy_pct_thresh,
+            position_scale:
+              typeof rec.position_scale === "number" ? rec.position_scale : 1.0,
+            min_hold_days:
+              typeof rec.min_hold_days === "number" ? rec.min_hold_days : 0,
+            long_term_ratio:
+              typeof rec.long_term_ratio === "number"
+                ? rec.long_term_ratio
+                : 0.0,
+            long_term_min_hold_days:
+              typeof rec.long_term_min_hold_days === "number"
+                ? rec.long_term_min_hold_days
+                : 0,
+            regime_sensitivity:
+              typeof rec.regime_sensitivity === "number" ? rec.regime_sensitivity : REGIME_SENS_DEFAULT,
+            regime_window_days:
+              typeof rec.regime_window_days === "number" ? rec.regime_window_days : REGIME_WINDOW_DAYS,
+            regime_trend_days:
+              typeof rec.regime_trend_days === "number" ? rec.regime_trend_days : REGIME_TREND_DAYS,
+            regime_range_pct:
+              typeof rec.regime_range_pct === "number" ? rec.regime_range_pct : REGIME_RANGE_PCT,
+            profit: rec.profit,
+            last_decision: rec.last_decision,
+            last_amount: rec.last_amount,
+            last_action_price: rec.last_action_price,
+            last_price: rec.last_price,
+            calc_used: rec.calc_used || "Precise (legacy cached thresholds)",
+            updated_at: rec.updated_at || null
+          };
+          // Keep a hint about what the last visible numbers represent
+          rec.last_run_mode = rec.last_run_mode || MODE_PRECISE;
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+        } catch (e) {
+          // ignore save failures
+        }
+      }
+
+      return parsed;
+    }
   } catch (e) {
     console.warn("Failed to load saved:", e);
   }
@@ -646,18 +847,18 @@ async function fetchStockDataFromApi(symbol) {
     symbol
   )}&apikey=${encodeURIComponent(apiKey)}`;
 
-  // Try full history first
-  let url = baseUrl + "&outputsize=full";
+  // Try compact history first
+  let url = baseUrl + "&outputsize=compact";
   let data = await fetchJson(url);
 
   let info = (data && (data.Information || data.Note)) || "";
   if (
     !data["Time Series (Daily)"] &&
     typeof info === "string" &&
-    info.toLowerCase().includes("outputsize=full")
+    info.toLowerCase().includes("outputsize=compact")
   ) {
     // fall back to compact
-    console.warn("outputsize=full is premium; retrying with compact");
+    console.warn("outputsize=compact is premium; retrying with compact");
     url = baseUrl + "&outputsize=compact";
     data = await fetchJson(url);
   }
@@ -733,7 +934,11 @@ function biasedTrader(
       position_scale: 1.0,
       min_hold_days: 0,
       long_term_ratio: 0.0,
-      long_term_min_hold_days: 0
+      long_term_min_hold_days: 0,
+      regime_sensitivity: REGIME_SENS_DEFAULT,
+      regime_window_days: REGIME_WINDOW_DAYS,
+      regime_trend_days: REGIME_TREND_DAYS,
+      regime_range_pct: REGIME_RANGE_PCT
     };
   }
 
@@ -773,6 +978,37 @@ function biasedTrader(
     )
   );
 
+  const regimeSensitivity = clamp(
+    typeof options.regimeSensitivity === "number"
+      ? options.regimeSensitivity
+      : REGIME_SENS_DEFAULT,
+    0.0,
+    2.0
+  );
+  const regimeWindowDays = Math.max(
+    3,
+    Math.floor(
+      typeof options.regimeWindowDays === "number"
+        ? options.regimeWindowDays
+        : REGIME_WINDOW_DAYS
+    )
+  );
+  const regimeTrendDays = Math.max(
+    2,
+    Math.floor(
+      typeof options.regimeTrendDays === "number"
+        ? options.regimeTrendDays
+        : REGIME_TREND_DAYS
+    )
+  );
+  const regimeRangePct = Math.max(
+    5,
+    typeof options.regimeRangePct === "number"
+      ? options.regimeRangePct
+      : REGIME_RANGE_PCT
+  );
+
+
   let wallet = startWallet;
 
   // each lot: { buyPrice, amount, buyIndex, isLong }
@@ -805,6 +1041,65 @@ function biasedTrader(
     lastAmount = 0;
     lastActionPrice = 0;
 
+    // ===== Regime scaling (multi-day range + trend) =====
+    // Compute rolling min/max over a short window to detect "huge" run-ups/drawdowns.
+    const wStart = Math.max(0, i - regimeWindowDays);
+    let wMin = Infinity;
+    let wMax = -Infinity;
+    for (let j = wStart; j <= i; j++) {
+      const v = prices[j];
+      if (v < wMin) wMin = v;
+      if (v > wMax) wMax = v;
+    }
+
+    const wRange = wMax - wMin;
+    const rangePct = wMin > 0 ? (wRange / wMin) * 100 : 0;
+    const posInRange = wRange > 0 ? (price - wMin) / wRange : 0.5;
+
+    const tIdx = Math.max(0, i - regimeTrendDays);
+    const tRef = prices[tIdx];
+    const trendPct = tRef > 0 ? ((price - tRef) / tRef) * 100 : 0;
+
+    const rangeStrength = clamp((rangePct - regimeRangePct) / regimeRangePct, 0, 2) / 2; // 0..1
+    const posHighStrength = clamp((posInRange - 0.75) / 0.25, 0, 1);
+    const posLowStrength = clamp((0.25 - posInRange) / 0.25, 0, 1);
+    const trendUpStrength = clamp((trendPct - regimeRangePct) / regimeRangePct, 0, 2) / 2;
+    const trendDownStrength = clamp(((-trendPct) - regimeRangePct) / regimeRangePct, 0, 2) / 2;
+
+    const overextendedStrength = rangeStrength * Math.max(posHighStrength, trendUpStrength);
+    const oversoldStrength = rangeStrength * Math.max(posLowStrength, trendDownStrength);
+
+    // Adjust thresholds and position sizing dynamically.
+    let effSellPctThresh = sellPctThresh;
+    let effBuyPctThresh = buyPctThresh;
+    let effPositionScale = positionScale;
+
+    if (overextendedStrength > 0) {
+      // After huge run-ups, require a larger drop to buy, and optionally sell a bit earlier.
+      effBuyPctThresh = buyPctThresh * (1 + regimeSensitivity * 1.25 * overextendedStrength);
+      effSellPctThresh = Math.max(
+        0.5,
+        sellPctThresh * (1 - regimeSensitivity * 0.25 * overextendedStrength)
+      );
+      effPositionScale = clamp(
+        effPositionScale * (1 - regimeSensitivity * 0.7 * overextendedStrength),
+        0.25,
+        4.0
+      );
+    } else if (oversoldStrength > 0) {
+      // After huge dips, allow buying earlier and a bit larger (mean-reversion bias).
+      effBuyPctThresh = Math.max(
+        0.5,
+        buyPctThresh * (1 - regimeSensitivity * 0.45 * oversoldStrength)
+      );
+      effPositionScale = clamp(
+        effPositionScale * (1 + regimeSensitivity * 0.9 * oversoldStrength),
+        0.25,
+        4.0
+      );
+    }
+
+
     // ========== SELL PHASE ==========
     if (lots.length) {
       const hasShortLots = lots.some((lot) => !lot.isLong);
@@ -826,7 +1121,7 @@ function biasedTrader(
         if (lot.isLong && hasShortLots) continue;
 
         const profitPct = ((price - buyPrice) / buyPrice) * 100;
-        if (buyPrice < price && profitPct > sellPctThresh) {
+        if (buyPrice < price && profitPct > effSellPctThresh) {
           wallet += amount * price;
           lots.splice(idx, 1);
           lastAmount += amount;
@@ -851,9 +1146,9 @@ function biasedTrader(
         }
       }
 
-      if (highestPercent < -buyPctThresh) {
+      if (highestPercent < -effBuyPctThresh) {
         let amount = 0;
-        const maxSteps = Math.floor(Math.abs(highestPercent) * positionScale);
+        const maxSteps = Math.floor(Math.abs(highestPercent) * effPositionScale);
 
         for (let step = 1; step <= maxSteps; step++) {
           if (wallet > price) {
@@ -935,7 +1230,11 @@ function biasedTrader(
     position_scale: positionScale,
     min_hold_days: minHoldDays,
     long_term_ratio: longTermRatio,
-    long_term_min_hold_days: longTermMinHoldDays
+    long_term_min_hold_days: longTermMinHoldDays,
+    regime_sensitivity: regimeSensitivity,
+    regime_window_days: regimeWindowDays,
+    regime_trend_days: regimeTrendDays,
+    regime_range_pct: regimeRangePct
   };
 }
 
@@ -1051,7 +1350,11 @@ async function gridSearchThresholdsWithProgress(
       positionScale: posScale,
       minHoldDays: minHold,
       longTermRatio: ltRatio,
-      longTermMinHoldDays: ltHold
+      longTermMinHoldDays: ltHold,
+      regimeSensitivity: REGIME_SENS_DEFAULT,
+      regimeWindowDays: REGIME_WINDOW_DAYS,
+      regimeTrendDays: REGIME_TREND_DAYS,
+      regimeRangePct: REGIME_RANGE_PCT
     });
 
     const profit = res.profit;
@@ -1059,7 +1362,6 @@ async function gridSearchThresholdsWithProgress(
       w > 0 && isFinite(w) ? (profit / w) * 100 : -Infinity;
 
     if (profitPct > bestProfitPct) {
-      console.log(Math.round(profitPct), w);
       bestProfitPct = profitPct;
       bestResult = {
         ...res,
@@ -1195,6 +1497,116 @@ async function gridSearchThresholdsWithProgress(
 
   return bestResult;
 }
+
+async function gridSearchThresholdsFixedWalletWithProgress(
+  prices,
+  fixedWallet,
+  onProgress
+) {
+  const sellValues = [];
+  const buyValues = [];
+
+  // 1.0% .. 25.0% in 0.5% steps
+  for (let i = 10; i <= 250; i += 5) {
+    const v = i / 10.0;
+    sellValues.push(v);
+    buyValues.push(v);
+  }
+
+  const positionScales = [0.5, 0.75, 1.0, 1.25];
+  const shortMinHolds = [0, 2, 5];
+  const longTermRatios = [0.0, 0.25, 0.5];
+  const longTermHoldDays = [0, 10, 20];
+
+  const totalIters =
+    sellValues.length *
+    buyValues.length *
+    positionScales.length *
+    shortMinHolds.length *
+    longTermRatios.length *
+    longTermHoldDays.length;
+
+  let count = 0;
+  let lastPercentShown = -1;
+
+  let bestProfitPct = -Infinity;
+  let bestResult = null;
+
+  async function registerEvalProgress() {
+    count++;
+    const percent = Math.min(99, Math.floor((count * 100) / totalIters));
+    if (onProgress && percent !== lastPercentShown) {
+      lastPercentShown = percent;
+      onProgress(percent);
+    }
+    if (count % 300 === 0) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  }
+
+  for (const sellThresh of sellValues) {
+    for (const buyThresh of buyValues) {
+      for (const posScale of positionScales) {
+        for (const minHold of shortMinHolds) {
+          for (const ltRatio of longTermRatios) {
+            for (const ltHold of longTermHoldDays) {
+              await registerEvalProgress();
+
+              const res = biasedTrader(
+                prices,
+                fixedWallet,
+                sellThresh,
+                buyThresh,
+                MAX_LOOKBACK_DAYS,
+                {
+                  positionScale: posScale,
+                  minHoldDays: minHold,
+                  longTermRatio: ltRatio,
+                  longTermMinHoldDays: ltHold,
+
+                  // new regime scaling (kept fixed unless you later decide to grid-search it)
+                  regimeSensitivity: REGIME_SENS_DEFAULT,
+                  regimeWindowDays: REGIME_WINDOW_DAYS,
+                  regimeTrendDays: REGIME_TREND_DAYS,
+                  regimeRangePct: REGIME_RANGE_PCT
+                }
+              );
+
+              const profitPct =
+                fixedWallet > 0 && isFinite(fixedWallet)
+                  ? (res.profit / fixedWallet) * 100
+                  : -Infinity;
+
+              if (profitPct > bestProfitPct) {
+                bestProfitPct = profitPct;
+                bestResult = {
+                  ...res,
+                  sell_pct_thresh: sellThresh,
+                  buy_pct_thresh: buyThresh,
+                  position_scale: posScale,
+                  min_hold_days: minHold,
+                  long_term_ratio: ltRatio,
+                  long_term_min_hold_days: ltHold,
+                  start_wallet: fixedWallet,
+
+                  // mirror regime fields for saving/display
+                  regime_sensitivity: REGIME_SENS_DEFAULT,
+                  regime_window_days: REGIME_WINDOW_DAYS,
+                  regime_trend_days: REGIME_TREND_DAYS,
+                  regime_range_pct: REGIME_RANGE_PCT
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (onProgress) onProgress(100);
+  return bestResult;
+}
+
 
 function updateChart(
   symbol,
@@ -1501,17 +1913,27 @@ function updateChart(
 }
 
 // Save the best simulation result for a symbol into localStorage
-function saveBestResult(symbol, result) {
-  const sym = symbol.toUpperCase();
+
+function saveBestResult(symbol, result, { mode = MODE_PRECISE, calcUsed = "" } = {}) {
+  const sym = (symbol || "").toUpperCase();
+  if (!sym) return;
+
   const saved = loadSaved();
   const prev = saved[sym] || {};
+  const prevStar = prev.starred || false;
 
-  saved[sym] = {
+  const modeKey = mode === MODE_QUICK ? MODE_QUICK : MODE_PRECISE;
+
+  if (!prev.modes) prev.modes = {};
+
+  const modeRecord = {
     symbol: sym,
     start_wallet:
       typeof result.start_wallet === "number" && isFinite(result.start_wallet)
         ? result.start_wallet
-        : START_WALLET,
+        : modeKey === MODE_QUICK
+          ? QUICK_START_WALLET
+          : START_WALLET,
     sell_pct_thresh: result.sell_pct_thresh,
     buy_pct_thresh: result.buy_pct_thresh,
     position_scale:
@@ -1520,27 +1942,65 @@ function saveBestResult(symbol, result) {
       typeof result.min_hold_days === "number" ? result.min_hold_days : 0,
     long_term_ratio:
       typeof result.long_term_ratio === "number" ? result.long_term_ratio : 0.0,
-    long_term_min_hold_days:
-      typeof result.long_term_min_hold_days === "number"
-        ? result.long_term_min_hold_days
-        : 0,
+    long_term_min_hold_days: result.long_term_min_hold_days,
+    regime_sensitivity: typeof result.regime_sensitivity === "number" ? result.regime_sensitivity : REGIME_SENS_DEFAULT,
+    regime_window_days: typeof result.regime_window_days === "number" ? result.regime_window_days : REGIME_WINDOW_DAYS,
+    regime_trend_days: typeof result.regime_trend_days === "number" ? result.regime_trend_days : REGIME_TREND_DAYS,
+    regime_range_pct: typeof result.regime_range_pct === "number" ? result.regime_range_pct : REGIME_RANGE_PCT,
     profit: result.profit,
     last_decision: result.last_decision,
     last_amount: result.last_amount,
     last_action_price: result.last_action_price,
     last_price: result.last_price,
-    starred: prev.starred || false
+    calc_used: calcUsed || (modeKey === MODE_QUICK ? "Quick" : "Precise"),
+    updated_at: Date.now()
+  };
+
+  prev.modes[modeKey] = modeRecord;
+
+  // Top-level compatibility fields (used by saved list sorting / display)
+  saved[sym] = {
+    symbol: sym,
+    modes: prev.modes,
+    starred: prevStar,
+    last_run_mode: modeKey,
+    calc_used: modeRecord.calc_used,
+
+    // mirror current mode record for backwards compatibility
+    start_wallet: modeRecord.start_wallet,
+    sell_pct_thresh: modeRecord.sell_pct_thresh,
+    buy_pct_thresh: modeRecord.buy_pct_thresh,
+    position_scale: modeRecord.position_scale,
+    min_hold_days: modeRecord.min_hold_days,
+    long_term_ratio: modeRecord.long_term_ratio,
+    long_term_min_hold_days: modeRecord.long_term_min_hold_days,
+    regime_sensitivity: modeRecord.regime_sensitivity,
+    regime_window_days: modeRecord.regime_window_days,
+    regime_trend_days: modeRecord.regime_trend_days,
+    regime_range_pct: modeRecord.regime_range_pct,
+    profit: modeRecord.profit,
+    last_decision: modeRecord.last_decision,
+    last_amount: modeRecord.last_amount,
+    last_action_price: modeRecord.last_action_price,
+    last_price: modeRecord.last_price
   };
 
   saveSaved(saved);
 }
 
 // ================== MAIN RUN LOGIC ==================
-async function runForInput(inputValue, { forceReoptimize = false } = {}) {
+async function runForInput(
+  inputValue,
+  { forceReoptimize = false, mode: modeOverride = null } = {}
+) {
   const raw = (inputValue || "").trim();
   if (!raw) return;
 
   let symbolUsed = null; // track which symbol we actually resolved
+  const modeKey =
+    modeOverride === MODE_PRECISE || modeOverride === MODE_QUICK
+      ? modeOverride
+      : getSelectedMode();
 
   runButton.disabled = true;
   setStatus("Resolving symbol...");
@@ -1553,87 +2013,167 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
   thresholdsExtra.textContent = "";
   profitText.textContent = "–";
   profitExtra.textContent = "";
+
   const runStartTime =
-    typeof performance !== "undefined" && performance.now
-      ? performance.now()
-      : Date.now();
+    typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
 
   try {
-    // resolve symbol (name → symbol, or use raw if it already looks like a ticker)
+    // ---- resolve symbol (AAPL, etc.) ----
     const resolved = await resolveSymbol(raw);
     const symbol = resolved.symbol.toUpperCase();
     symbolUsed = symbol;
-    input.value = symbol;
 
-    setStatus(`Using symbol ${symbol}…`);
-    setProgress(5, "Checking cached prices…");
+    setStatus(`Fetching data for ${symbol}...`);
+    setProgress(5, `Fetching prices for ${symbol}...`);
 
-    // load prices (from cache or API)
-    const { dates, prices } = await getStockData(symbol);
+    // ---- prices (cached) ----
+    const data = await getStockData(symbol);
+    const dates = data.dates || [];
+    const prices = data.prices || [];
+    if (!prices.length) throw new Error("No price data returned.");
 
+    // ---- load saved thresholds/settings (mode-aware) ----
     const savedAll = loadSaved();
-    const saved = savedAll[symbol.toUpperCase()];
-    let bestResult;
+    const savedEntry = savedAll[symbol] || null;
 
-    if (saved && !forceReoptimize) {
-      setProgress(20, "Using cached thresholds");
+    const modes = savedEntry && typeof savedEntry === "object" ? savedEntry.modes || {} : {};
+    const savedPrecise = modes[MODE_PRECISE] || (savedEntry && savedEntry.sell_pct_thresh != null ? savedEntry : null);
+    const savedMode = modes[modeKey] || null;
 
-      const usedStartWalletFromSaved =
-        typeof saved.start_wallet === "number" && isFinite(saved.start_wallet)
-          ? saved.start_wallet
-          : START_WALLET;
+    let bestResult = null;
+    let calcUsed = "";
 
-      const options = {
-        positionScale:
-          typeof saved.position_scale === "number" ? saved.position_scale : 1.0,
-        minHoldDays:
-          typeof saved.min_hold_days === "number" ? saved.min_hold_days : 0,
-        longTermRatio:
-          typeof saved.long_term_ratio === "number"
-            ? saved.long_term_ratio
-            : 0.0,
-        longTermMinHoldDays:
-          typeof saved.long_term_min_hold_days === "number"
-            ? saved.long_term_min_hold_days
-            : 0
-      };
+    if (modeKey === MODE_PRECISE) {
+      if (savedMode && !forceReoptimize) {
+        setProgress(20, "Using cached Precise thresholds");
 
-      bestResult = biasedTrader(
-        prices,
-        usedStartWalletFromSaved,
-        saved.sell_pct_thresh,
-        saved.buy_pct_thresh,
-        MAX_LOOKBACK_DAYS,
-        options
-      );
+        const usedStartWalletFromSaved =
+          typeof savedMode.start_wallet === "number" && isFinite(savedMode.start_wallet)
+            ? savedMode.start_wallet
+            : START_WALLET;
 
-      // make sure the result object carries over the tuned parameters
-      bestResult.start_wallet = usedStartWalletFromSaved;
-      bestResult.sell_pct_thresh = saved.sell_pct_thresh;
-      bestResult.buy_pct_thresh = saved.buy_pct_thresh;
-      bestResult.position_scale = options.positionScale;
-      bestResult.min_hold_days = options.minHoldDays;
-      bestResult.long_term_ratio = options.longTermRatio;
-      bestResult.long_term_min_hold_days = options.longTermMinHoldDays;
+        const options = {
+          positionScale:
+            typeof savedMode.position_scale === "number" ? savedMode.position_scale : 1.0,
+          minHoldDays:
+            typeof savedMode.min_hold_days === "number" ? savedMode.min_hold_days : 0,
+          longTermRatio:
+            typeof savedMode.long_term_ratio === "number" ? savedMode.long_term_ratio : 0.0,
+          longTermMinHoldDays:
+            typeof savedMode.long_term_min_hold_days === "number"
+              ? savedMode.long_term_min_hold_days
+              : 0
+        
+          ,
+          regimeSensitivity:
+            typeof savedMode.regime_sensitivity === "number" ? savedMode.regime_sensitivity : REGIME_SENS_DEFAULT,
+          regimeWindowDays:
+            typeof savedMode.regime_window_days === "number" ? savedMode.regime_window_days : REGIME_WINDOW_DAYS,
+          regimeTrendDays:
+            typeof savedMode.regime_trend_days === "number" ? savedMode.regime_trend_days : REGIME_TREND_DAYS,
+          regimeRangePct:
+            typeof savedMode.regime_range_pct === "number" ? savedMode.regime_range_pct : REGIME_RANGE_PCT
 
-      setProgress(100, "Using cached thresholds");
+        };
+
+        bestResult = biasedTrader(
+          prices,
+          usedStartWalletFromSaved,
+          savedMode.sell_pct_thresh,
+          savedMode.buy_pct_thresh,
+          MAX_LOOKBACK_DAYS,
+          options
+        );
+
+        // carry over tuned params
+        bestResult.start_wallet = usedStartWalletFromSaved;
+        bestResult.sell_pct_thresh = savedMode.sell_pct_thresh;
+        bestResult.buy_pct_thresh = savedMode.buy_pct_thresh;
+        bestResult.position_scale = options.positionScale;
+        bestResult.min_hold_days = options.minHoldDays;
+        bestResult.long_term_ratio = options.longTermRatio;
+        bestResult.long_term_min_hold_days = options.longTermMinHoldDays;
+
+        bestResult.regime_sensitivity = options.regimeSensitivity ?? REGIME_SENS_DEFAULT;
+        bestResult.regime_window_days = options.regimeWindowDays ?? REGIME_WINDOW_DAYS;
+        bestResult.regime_trend_days = options.regimeTrendDays ?? REGIME_TREND_DAYS;
+        bestResult.regime_range_pct = options.regimeRangePct ?? REGIME_RANGE_PCT;
+
+        calcUsed = savedMode.calc_used || "Precise (cached thresholds)";
+        setProgress(100, "Using cached Precise thresholds");
+      } else {
+        setProgress(10, "Optimizing thresholds (Precise)...");
+        bestResult = await gridSearchThresholdsWithProgress(
+          prices,
+          START_WALLET,
+          (p) => setProgress(p, `Precise search: ${p}%`)
+        );
+        calcUsed = "Precise (grid search + wallet evals)";
+      }
     } else {
-      setProgress(10, "Optimizing thresholds.");
-      bestResult = await gridSearchThresholdsWithProgress(
-        prices,
-        START_WALLET,
-        (p) => setProgress(p, `Grid search: ${p}%`)
-      );
+      // QUICK mode: same threshold/param search as Precise, but with a single fixed wallet
+      const quickWallet = QUICK_START_WALLET;
+
+      if (savedMode && !forceReoptimize) {
+        setProgress(20, "Using cached Quick settings");
+
+        const options = {
+          positionScale:
+            typeof savedMode.position_scale === "number" ? savedMode.position_scale : 1.0,
+          minHoldDays:
+            typeof savedMode.min_hold_days === "number" ? savedMode.min_hold_days : 0,
+          longTermRatio:
+            typeof savedMode.long_term_ratio === "number" ? savedMode.long_term_ratio : 0.0,
+          longTermMinHoldDays:
+            typeof savedMode.long_term_min_hold_days === "number"
+              ? savedMode.long_term_min_hold_days
+              : 0
+        };
+
+        bestResult = biasedTrader(
+          prices,
+          quickWallet,
+          savedMode.sell_pct_thresh,
+          savedMode.buy_pct_thresh,
+          MAX_LOOKBACK_DAYS,
+          options
+        );
+
+        bestResult.start_wallet = quickWallet;
+        bestResult.sell_pct_thresh = savedMode.sell_pct_thresh;
+        bestResult.buy_pct_thresh = savedMode.buy_pct_thresh;
+        bestResult.position_scale = options.positionScale;
+        bestResult.min_hold_days = options.minHoldDays;
+        bestResult.long_term_ratio = options.longTermRatio;
+        bestResult.long_term_min_hold_days = options.longTermMinHoldDays;
+
+        bestResult.regime_sensitivity = options.regimeSensitivity ?? REGIME_SENS_DEFAULT;
+        bestResult.regime_window_days = options.regimeWindowDays ?? REGIME_WINDOW_DAYS;
+        bestResult.regime_trend_days = options.regimeTrendDays ?? REGIME_TREND_DAYS;
+        bestResult.regime_range_pct = options.regimeRangePct ?? REGIME_RANGE_PCT;
+
+        calcUsed = savedMode.calc_used || "Quick (cached settings)";
+        setProgress(100, "Using cached Quick settings");
+      } else {
+        setProgress(10, "Optimizing thresholds (Quick, fixed wallet)...");
+        bestResult = await gridSearchThresholdsFixedWalletWithProgress(
+          prices,
+          quickWallet,
+          (p) => setProgress(p, `Quick search: ${p}%`)
+        );
+        calcUsed = `Quick (grid search, fixed $${quickWallet.toFixed(0)} wallet)`;
+      }
     }
+
     if (!bestResult) {
-      throw new Error("No result from grid search.");
+      throw new Error("No result from simulation.");
     }
 
     // ---------- BUILD EQUITY CURVE & TRADE MARKERS FOR CHART ----------
     const usedStartWallet =
       typeof bestResult.start_wallet === "number" && isFinite(bestResult.start_wallet)
         ? bestResult.start_wallet
-        : START_WALLET;
+        : (modeKey === MODE_QUICK ? QUICK_START_WALLET : START_WALLET);
 
     const chartSim = biasedTrader(
       prices,
@@ -1646,6 +2186,10 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
         minHoldDays: bestResult.min_hold_days ?? 0,
         longTermRatio: bestResult.long_term_ratio ?? 0.0,
         longTermMinHoldDays: bestResult.long_term_min_hold_days ?? 0,
+        regimeSensitivity: bestResult.regime_sensitivity ?? REGIME_SENS_DEFAULT,
+        regimeWindowDays: bestResult.regime_window_days ?? REGIME_WINDOW_DAYS,
+        regimeTrendDays: bestResult.regime_trend_days ?? REGIME_TREND_DAYS,
+        regimeRangePct: bestResult.regime_range_pct ?? REGIME_RANGE_PCT,
         trackCurve: true
       }
     );
@@ -1682,11 +2226,12 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
       decisionMain = "HOLD";
     }
 
-    decisionText.textContent = `${symbol}: ${decisionMain}`;
-    if (amount > 0 && actionPrice > 0) {
-      decisionExtra.textContent = `$${actionPrice.toFixed(
-        2
-      )}`;
+    decisionText.textContent = decisionMain;
+    decisionText.style.color =
+      decision === "BUY" ? "#4ade80" : decision === "SELL" ? "#f97373" : "#9ca3af";
+
+    if ((decision === "BUY" || decision === "SELL") && amount > 0 && isFinite(actionPrice)) {
+      decisionExtra.textContent = `$${actionPrice.toFixed(2)}`;
     } else {
       decisionExtra.textContent = `$${bestResult.last_price.toFixed(2)}`;
     }
@@ -1700,12 +2245,20 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
     const minHold = bestResult.min_hold_days ?? 0;
     const ltRatio = bestResult.long_term_ratio ?? 0.0;
     const ltHold = bestResult.long_term_min_hold_days ?? 0;
+
+    const modeLabel = modeKey === MODE_QUICK ? "Quick" : "Precise";
     thresholdsExtra.textContent =
-      `Lookback up to ${MAX_LOOKBACK_DAYS} days` +
+      `Mode: ${modeLabel}` +
+      (calcUsed ? ` | ${calcUsed}` : "") +
+      ` | Lookback up to ${MAX_LOOKBACK_DAYS} days` +
       ` | Pos scale ×${posScale.toFixed(2)}` +
       ` | Short min hold ${minHold}d` +
       ` | LT ratio ${(ltRatio * 100).toFixed(0)}%` +
       ` | LT min hold ${ltHold}d` +
+      ` | Regime sens ×${(bestResult.regime_sensitivity ?? REGIME_SENS_DEFAULT).toFixed(2)}` +
+      ` | Regime window ${bestResult.regime_window_days ?? REGIME_WINDOW_DAYS}d` +
+      ` | Trend window ${bestResult.regime_trend_days ?? REGIME_TREND_DAYS}d` +
+      ` | Huge-range ≥${(bestResult.regime_range_pct ?? REGIME_RANGE_PCT).toFixed(0)}%` +
       ` | Start wallet $${usedStartWallet.toFixed(2)}`;
 
     // ---------- PROFIT TEXT ----------
@@ -1714,11 +2267,9 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
     const profitPct = (profit / usedStartWallet) * 100;
 
     const profitStr =
-      (profit >= 0 ? "+$" : "-$") + Math.abs(profit).toFixed(2);
+      (profit >= 0 ? "+" : "-") + "$" + Math.abs(profit).toFixed(2);
     const pctStr =
-      (profitPct >= 0 ? "+" : "-") +
-      Math.abs(profitPct).toFixed(2) +
-      "%";
+      (profitPct >= 0 ? "+" : "-") + Math.abs(profitPct).toFixed(2) + "%";
 
     profitText.textContent = `${profitStr} (${pctStr})`;
     profitText.style.color = profit >= 0 ? "#4ade80" : "#f97373";
@@ -1727,25 +2278,22 @@ async function runForInput(inputValue, { forceReoptimize = false } = {}) {
       2
     )} (wallet + holdings)`;
 
-        // ---------- SAVE & REFRESH SAVED LIST ----------
-    saveBestResult(symbol, bestResult);
+    // ---------- SAVE & REFRESH SAVED LIST ----------
+    saveBestResult(symbol, bestResult, { mode: modeKey, calcUsed });
     renderSavedList();
 
     // how long did the whole run take?
     const runEndTime =
-      typeof performance !== "undefined" && performance.now
-        ? performance.now()
-        : Date.now();
-    const elapsedSec = Math.round((runEndTime - runStartTime) / 1000);
-    const elapsedText =
-      elapsedSec >= 10 ? elapsedSec.toFixed(1) : elapsedSec.toFixed(2);
-
-    setStatus(`Done in ${elapsedText}s`);
-    input.value = "";
+      typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+    const ms = runEndTime - runStartTime;
+    setStatus(`Done (${modeLabel}) — ${(ms / 1000).toFixed(2)}s`);
+    setProgress(100, "Done");
+    markCurrentSymbol(symbol);
   } catch (err) {
     console.error(err);
-    setStatus(String(err), true);
-    setProgress(0, "Idle");
+    const msg = err?.message || String(err);
+    setStatus("Error: " + msg);
+    setProgress(0, "Error");
   } finally {
     runButton.disabled = false;
     if (symbolUsed) {
@@ -1774,7 +2322,7 @@ savedList.addEventListener("click", (e) => {
     const sym = reload.dataset.symbol;
     if (sym) {
       input.value = sym;
-      runForInput(sym, { forceReoptimize: true });
+      runForInput(sym, { mode: getSelectedMode(), forceReoptimize: e.shiftKey });
     }
     e.stopPropagation();
     return;
@@ -1806,7 +2354,26 @@ savedList.addEventListener("click", (e) => {
   }
 
   input.value = sym;
-  runForInput(sym);
+
+  // When switching between saved stocks, always use whatever mode that stock
+  // was last calculated with (so we don't "flip" a stock's results just because
+  // the global toggle is currently on Quick/Precise).
+  const saved = loadSaved();
+  const rec = saved[(sym || "").toUpperCase()];
+  let preferredMode = null;
+
+  if (rec) {
+    // Primary: last_run_mode
+    if (rec.last_run_mode === MODE_QUICK || rec.last_run_mode === MODE_PRECISE) {
+      preferredMode = rec.last_run_mode;
+    } else if (rec.modes) {
+      // Fallback: pick whichever exists (prefer precise if present)
+      if (rec.modes[MODE_PRECISE]) preferredMode = MODE_PRECISE;
+      else if (rec.modes[MODE_QUICK]) preferredMode = MODE_QUICK;
+    }
+  }
+
+  runForInput(sym, preferredMode ? { mode: preferredMode } : undefined);
 });
 
 clearSavedBtn.addEventListener("click", () => {
