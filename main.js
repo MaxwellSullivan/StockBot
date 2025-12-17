@@ -973,7 +973,7 @@ function renderSavedList() {
     const amtRaw = (displayRec && displayRec.last_amount != null) ? displayRec.last_amount : "";
     const amtLabel = (typeof amtRaw === "string") ? amtRaw : ((typeof amtRaw === "number" && amtRaw > 0) ? String(amtRaw) : "");
 
-    const isAction = (dec === "BUY" || dec === "SELL") && !!amtLabel;
+    const isAction = (dec === "BUY" || dec === "SELL");
 
     return {
       ...rec,
@@ -1023,8 +1023,8 @@ function renderSavedList() {
 
     let decisionLabel = "HOLD";
     let decisionColor = "#9ca3af";
-    if ((dec === "BUY" || dec === "SELL") && amtLabel) {
-      decisionLabel = `${dec} ${amtLabel}`;
+    if (dec === "BUY" || dec === "SELL") {
+      decisionLabel = dec;
       decisionColor = dec === "BUY" ? "#4ade80" : "#f97373";
     }
 
@@ -2780,30 +2780,30 @@ async function runForInput(
 
     const signal = computeSignalSizedDecision(prices, bestResult, portfolioSnap);
 
-    // Store both (debuggable), but use the signal for UI + saving.
+    
+
+    // High-only action: only show BUY/SELL when the signal strength is HIGH; otherwise HOLD.
+    const isHighStrength =
+      (signal.size === SIZE_HIGH) || (String(signal.size || "").toUpperCase() === "HIGH");
+    const finalDecision =
+      ((signal.decision === "BUY" || signal.decision === "SELL") && isHighStrength)
+        ? signal.decision
+        : "HOLD";
+// Store both (debuggable), but use the signal for UI + saving.
     bestResult.exec_last_decision = execDecision;
     bestResult.exec_last_amount = execAmount;
     bestResult.signal_score = signal.score;
     bestResult.signal_reason = signal.reason;
     bestResult.signal_suggested_shares = signal.suggestedShares;
 
-    bestResult.last_decision = signal.decision;
-    bestResult.last_amount = signal.size || "";
+    bestResult.last_decision = finalDecision;
+    bestResult.last_amount = "";
     bestResult.last_action_price = bestResult.last_price; // latest price (we're signaling "now")
 
-    let decisionMain = "HOLD";
-    if (signal.decision === "BUY" || signal.decision === "SELL") {
-      const sizeText = signal.size ? ` (${signal.size})` : "";
-      const sharesText =
-        (typeof signal.suggestedShares === "number" && signal.suggestedShares > 0)
-          ? ` ~${signal.suggestedShares} sh`
-          : "";
-      decisionMain = `${signal.decision}${sizeText}${sharesText}`;
-    }
-
-    decisionText.textContent = decisionMain;
+    // Display: only BUY/SELL when signal is HIGH, otherwise HOLD
+    decisionText.textContent = finalDecision;
     decisionText.style.color =
-      signal.decision === "BUY" ? "#4ade80" : signal.decision === "SELL" ? "#f97373" : "#9ca3af";
+      finalDecision === "BUY" ? "#4ade80" : finalDecision === "SELL" ? "#f97373" : "#9ca3af";
 
     // show latest price; (optional) keep this simple so UI stays clean
     // show latest price + avg win/loss from the chart simulation
