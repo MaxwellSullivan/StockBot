@@ -1,47 +1,33 @@
-// ================== CONSTANTS ==================
 const START_WALLET = 5000.0;
 
 const MODE_STORAGE_KEY = "stockbot_mode";
 const MODE_QUICK = "quick";
 const MODE_PRECISE = "precise";
 
-// Quick mode runs a single simulation using this fixed starting wallet:
 const QUICK_START_WALLET = 4000.0;
 
-// Bulk reload: start the next symbol every N ms (staggered concurrency)
 const RELOAD_ALL_STAGGER_MS = 500;
 
 
-// Regime / mean-reversion scaling (helps avoid buying tiny dips after huge run-ups,
-// and buys more aggressively after large multi-day dips)
-const REGIME_SENS_DEFAULT = 1.0;     // 0 disables; 1 = normal; >1 stronger
-const REGIME_WINDOW_DAYS = 10;       // rolling min/max window
-const REGIME_TREND_DAYS = 7;         // multi-day trend window
-const REGIME_RANGE_PCT = 20;         // range% needed to consider a move "huge"
-// ===== Causal smoothing / noise / curve params =====
-// smoothingMethod: "ema" (default) or "none"
+const REGIME_SENS_DEFAULT = 1.0;
+const REGIME_WINDOW_DAYS = 10;
+const REGIME_TREND_DAYS = 7;
+const REGIME_RANGE_PCT = 20;
 const SMOOTH_METHOD_DEFAULT = "ema";
 
-// EMA base alpha (lower = smoother, higher = more reactive)
 const SMOOTH_ALPHA_BASE_DEFAULT = 0.35;
 
-// Clamp so it never gets "too smooth" (too laggy) or too twitchy
 const SMOOTH_MIN_ALPHA_DEFAULT = 0.15;
 const SMOOTH_MAX_ALPHA_DEFAULT = 0.75;
 
-// Noise estimate = avg absolute daily return% over last N days
 const SMOOTH_NOISE_LOOKBACK_DAYS_DEFAULT = 7;
 
-// “Rigidity” target: if noise% > this, we treat it as noisy/unreliable
 const SMOOTH_RIGIDITY_PCT_DEFAULT = 1.25;
 
-// How aggressively alpha shrinks when noise rises above rigidity
 const SMOOTH_ADAPT_STRENGTH_DEFAULT = 1.2;
 
-// When noisy, scale thresholds up and position size down by this strength
 const NOISE_PENALTY_STRENGTH_DEFAULT = 0.8;
 
-// Curve detection (slope + acceleration) over last N days
 const CURVE_LOOKBACK_DAYS_DEFAULT = 6;
 const CURVE_WEIGHT_DEFAULT = 0.5;
 
@@ -50,7 +36,6 @@ const STORAGE_KEY = "biasTraderSavedV7";
 const PRICE_CACHE_KEY = "biasTraderPriceV7";
 const NAME_MAP_KEY = "biasTraderNameMapV7";
 
-// Simple name→symbol hints
 const BUILTIN_NAME_MAP = {
   apple: "AAPL",
   "apple inc": "AAPL",
@@ -70,24 +55,15 @@ const BUILTIN_NAME_MAP = {
   netflix: "NFLX"
 };
 
-// ================== DOM HOOKS ==================
 const form = document.getElementById("symbol-form");
 const input = document.getElementById("symbol-input");
 const runButton = document.getElementById("run-button");
 
-
-
-/**
- * Mode toggle UI (Quick vs Precise)
- * - Quick: single run with QUICK_START_WALLET
- * - Precise: current behavior (grid search + wallet evals) when not cached
- */
 function getSelectedMode() {
   const q = document.getElementById("mode-quick");
   const p = document.getElementById("mode-precise");
   if (q && p) return q.checked ? MODE_QUICK : MODE_PRECISE;
 
-  // backward-compat: older checkbox toggle
   const el = document.getElementById("mode-toggle");
   if (el) return el.checked ? MODE_QUICK : MODE_PRECISE;
 
@@ -99,7 +75,6 @@ function setSelectedMode(mode) {
   const m = mode === MODE_PRECISE ? MODE_PRECISE : MODE_QUICK;
   localStorage.setItem(MODE_STORAGE_KEY, m);
 
-  // Preferred DOM: segmented radios
   const q = document.getElementById("mode-quick");
   const p = document.getElementById("mode-precise");
   if (q && p) {
@@ -108,7 +83,6 @@ function setSelectedMode(mode) {
     return;
   }
 
-  // backward-compat: older checkbox toggle
   const el = document.getElementById("mode-toggle");
   const lbl = document.getElementById("mode-toggle-label");
   if (el) el.checked = m === MODE_QUICK;
@@ -116,68 +90,53 @@ function setSelectedMode(mode) {
 }
 
 function ensureModeToggle() {
-  // If the HTML already has the segmented control, just wire it up.
   const q = document.getElementById("mode-quick");
   const p = document.getElementById("mode-precise");
   if (q && p) {
     q.addEventListener("change", () => setSelectedMode(MODE_QUICK));
     p.addEventListener("change", () => setSelectedMode(MODE_PRECISE));
-    // Default to Quick unless user previously chose Precise
     setSelectedMode(getSelectedMode());
     return;
   }
 
-  // backward-compat: older checkbox toggle already exists
   if (document.getElementById("mode-toggle")) {
     setSelectedMode(getSelectedMode());
     return;
   }
-
-  // Fallback: inject a segmented control next to the Run button
   if (!runButton || !runButton.parentNode) return;
-
   const wrap = document.createElement("div");
   wrap.style.display = "flex";
   wrap.style.alignItems = "center";
   wrap.style.gap = "10px";
-
   const parent = runButton.parentNode;
   parent.insertBefore(wrap, runButton);
   wrap.appendChild(runButton);
-
   const seg = document.createElement("div");
   seg.className = "segmented-toggle";
   seg.id = "mode-seg";
   seg.setAttribute("role", "group");
   seg.setAttribute("aria-label", "Run mode");
-
   const inputQ = document.createElement("input");
   inputQ.type = "radio";
   inputQ.id = "mode-quick";
   inputQ.name = "run-mode";
   inputQ.value = "quick";
-
   const labelQ = document.createElement("label");
   labelQ.setAttribute("for", "mode-quick");
   labelQ.textContent = "Quick";
-
   const inputP = document.createElement("input");
   inputP.type = "radio";
   inputP.id = "mode-precise";
   inputP.name = "run-mode";
   inputP.value = "precise";
-
   const labelP = document.createElement("label");
   labelP.setAttribute("for", "mode-precise");
   labelP.textContent = "Precise";
-
   seg.appendChild(inputQ);
   seg.appendChild(labelQ);
   seg.appendChild(inputP);
   seg.appendChild(labelP);
-
   wrap.appendChild(seg);
-
   inputQ.addEventListener("change", () => setSelectedMode(MODE_QUICK));
   inputP.addEventListener("change", () => setSelectedMode(MODE_PRECISE));
 
@@ -206,18 +165,15 @@ const profitExtra = document.getElementById("profit-extra");
 const chartCanvas = document.getElementById("chart");
 let priceChart = null;
 
-// Track which symbol is currently shown on the main chart
 let currentSymbol = null;
-// Progress & ETA state
 let currentProgressPercent = 0;
-let reloadAllInProgress = false;    // internal 0–100
-let etaStartTime = null;           // when the bar first moved
-let etaStartDisplayPercent = 0;    // bar percent at that time (usually 0)
-let etaAvgMsPerPercent = null;     // smoothed *average* ms per 1% of the BAR
+let reloadAllInProgress = false;
+let etaStartTime = null;
+let etaStartDisplayPercent = 0;
+let etaAvgMsPerPercent = null;
 let etaTimerId = null;
 let etaRemainingSec = null;
 
-// Grid-search status message state
 const GRID_STATUS_MESSAGES = [
   "Simulating wallets...",
   "Optimizing your tendies...",
@@ -231,9 +187,9 @@ const GRID_STATUS_MESSAGES = [
   "Optimizing diamond hands..."
 ];
 
-let gridSearchMessageCount = 0;     // quirky messages since last numeric %
-let gridSearchNextPercentIn = 3;    // after 3–5 messages, show a percent line
-let lastGridStatusUpdateTime = 0;   // last time (ms) we changed the status line
+let gridSearchMessageCount = 0;
+let gridSearchNextPercentIn = 3;
+let lastGridStatusUpdateTime = 0;
 
 function resetGridSearchMessageInterval() {
   gridSearchMessageCount = 0;
@@ -248,16 +204,14 @@ if (typeof Chart !== "undefined" && Chart.Tooltip && Chart.Tooltip.positioners) 
     const data = chart.data || {};
     const datasets = data.datasets || [];
     const labels = data.labels || [];
-    const offset = 22; // horizontal distance from the point
+    const offset = 22;
 
     if (!items || !items.length) return eventPosition;
 
-    // 1) Start from the built-in "average" tooltip position
     const avgPos = Chart.Tooltip.positioners.average.call(this, items, eventPosition);
     let baseX = avgPos.x;
     let baseY = avgPos.y;
 
-    // 2) Find the Simulation value item (fallback: first item)
     let simItem = items[0];
     for (const it of items) {
       const ds = datasets[it.datasetIndex];
@@ -267,7 +221,6 @@ if (typeof Chart !== "undefined" && Chart.Tooltip && Chart.Tooltip.positioners) 
       }
     }
 
-    // Attach Y to the Simulation point if possible
     if (simItem.element) {
       const el = simItem.element;
       const pos =
@@ -280,7 +233,6 @@ if (typeof Chart !== "undefined" && Chart.Tooltip && Chart.Tooltip.positioners) 
       }
     }
 
-    // 3) Decide which side using the data index (no jitter, no pixels)
     const maxIndex = labels.length > 0 ? labels.length - 1 : 0;
     const midIndex = maxIndex / 2;
     const idx =
@@ -292,14 +244,12 @@ if (typeof Chart !== "undefined" && Chart.Tooltip && Chart.Tooltip.positioners) 
     
     const side = idx <= midIndex ? "right" : "left";
 
-    // 4) Apply offset horizontally from that x position
-    const x = baseX;// + (side === "right" ? offset : -offset);
+    const x = baseX;
     const y = baseY;
     return { x, y };
   };
 }
 
-// ================== STATE / HELPERS ==================
 function setStatus(msg, isError = false) {
   statusEl.textContent = msg || "";
   statusEl.className = "status" + (isError ? " error" : "");
@@ -310,15 +260,11 @@ function setProgress(percent, label, opts) {
   const scope = opts.scope || "default";
   const raw = !!opts.raw;
 
-  // During reload-all, only allow the global updater to touch the bar/text.
   if (reloadAllInProgress && scope !== "reloadAll") return;
 
-  // Internal progress (0–100) from the pipeline / grid search
   const p = Math.max(0, Math.min(100, percent));
   currentProgressPercent = p;
 
-  // Map internal progress to displayed bar percent:
-  // 0–60 internal → 0–99 visual, 60–100 internal → hold at 99 until done.
   let displayPercent;
   if (raw) {
     displayPercent = p;
@@ -333,7 +279,6 @@ function setProgress(percent, label, opts) {
   }
   displayPercent = Math.max(0, Math.min(100, displayPercent));
 
-  // Update bar
   if (progressBar) {
     progressBar.style.width = displayPercent + "%";
   }
@@ -343,9 +288,7 @@ function setProgress(percent, label, opts) {
       ? performance.now()
       : Date.now();
 
-  // ===== ETA based on *average* speed of the BAR =====
   if (displayPercent > 0 && displayPercent < 100) {
-    // New run or bar went backwards → reset baseline
     if (etaStartTime === null || displayPercent < etaStartDisplayPercent) {
       etaStartTime = now;
       etaStartDisplayPercent = displayPercent;
@@ -356,14 +299,12 @@ function setProgress(percent, label, opts) {
       const progressed = displayPercent - etaStartDisplayPercent;
 
       if (progressed > 0 && elapsedMs > 0) {
-        // Raw average speed from start of the run
         const rawMsPerPercent = elapsedMs / progressed;
 
-        // Smooth it heavily so it doesn't jump around
         if (etaAvgMsPerPercent == null) {
           etaAvgMsPerPercent = rawMsPerPercent;
         } else {
-          const alphaSpeed = 0.15; // 15% new, 85% old
+          const alphaSpeed = 0.15;
           etaAvgMsPerPercent =
             etaAvgMsPerPercent * (1 - alphaSpeed) +
             rawMsPerPercent * alphaSpeed;
@@ -372,11 +313,10 @@ function setProgress(percent, label, opts) {
         const remainingPercent = Math.max(100 - displayPercent, 0);
         const rawRemainingSec = (etaAvgMsPerPercent * remainingPercent) / 1000;
 
-        // Also smooth the displayed remaining time itself so drops/bumps are gentle
         if (etaRemainingSec == null) {
           etaRemainingSec = Math.round(rawRemainingSec);
         } else {
-          const alphaEta = 0.2; // 20% new value each update
+          const alphaEta = 0.2;
           const smoothed =
             etaRemainingSec * (1 - alphaEta) + rawRemainingSec * alphaEta;
           etaRemainingSec = Math.max(0, Math.round(smoothed));
@@ -384,7 +324,6 @@ function setProgress(percent, label, opts) {
       }
     }
 
-    // Show ETA text
     if (etaText) {
       if (etaRemainingSec != null && isFinite(etaRemainingSec) && etaRemainingSec > 0) {
         etaText.textContent = `Estimated remaining time: ${etaRemainingSec}s`;
@@ -393,7 +332,6 @@ function setProgress(percent, label, opts) {
       }
     }
 
-    // Countdown timer that decrements etaRemainingSec once per second
     if (!etaTimerId && etaText) {
       etaTimerId = setInterval(() => {
         if (currentProgressPercent >= 100 || etaRemainingSec == null) {
@@ -417,7 +355,6 @@ function setProgress(percent, label, opts) {
       }, 1000);
     }
   } else {
-    // Finished or reset (bar at 0 or 100)
     etaStartTime = null;
     etaStartDisplayPercent = 0;
     etaAvgMsPerPercent = null;
@@ -431,17 +368,14 @@ function setProgress(percent, label, opts) {
       etaTimerId = null;
     }
 
-    // Reset quirky-message cadence when run ends
     gridSearchMessageCount = 0;
     lastGridStatusUpdateTime = 0;
-    gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3); // 3–5
+    gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3);
   }
 
-  // ===== Status / progress text =====
   const isGridSearch =
     typeof label === "string" && label.toLowerCase().includes("grid search");
 
-  // Non-grid operations: label + BAR percent
   if (!isGridSearch) {
     const baseLabel = label || "Progress";
     if (progressText) {
@@ -450,7 +384,6 @@ function setProgress(percent, label, opts) {
     return;
   }
 
-  // Grid-search status: only change message every ≥ 3s
   if (!GRID_STATUS_MESSAGES.length) {
     if (progressText) {
       progressText.textContent = `Grid search: ${displayPercent}%`;
@@ -466,12 +399,10 @@ function setProgress(percent, label, opts) {
 
     let text;
     if (gridSearchMessageCount >= gridSearchNextPercentIn || isFinal) {
-      // Every 3–5 updates (or at the end), show numeric progress
       text = `Grid search: ${displayPercent}%`;
       gridSearchMessageCount = 0;
-      gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3); // 3–5
+      gridSearchNextPercentIn = 3 + Math.floor(Math.random() * 3);
     } else {
-      // Otherwise show a quirky message
       const idx = Math.floor(Math.random() * GRID_STATUS_MESSAGES.length);
       text = GRID_STATUS_MESSAGES[idx] || "Simulating...";
       gridSearchMessageCount++;
@@ -487,7 +418,6 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// after 2pm local time?
 function isAfterDailyRefreshCutoff() {
   const now = new Date();
   return now.getHours() >= 14;
@@ -520,7 +450,6 @@ function slopePct(series, i, lookbackDays) {
 }
 
 async function fetchJson(url) {
-  // Log every network call (helps diagnose API quota usage)
   try {
     console.log(`[API CALL] ${new Date().toISOString()} -> ${url}`);
   } catch (_) {}
@@ -538,14 +467,12 @@ function formatMoney(value, withSign = false) {
   return sign + abs;
 }
 
-// Estimate average win/loss % from trade markers (buy/sell shares) on the chart simulation.
-// We treat remaining (unsold) lots as unrealized P/L at the latest price so losses can appear.
 function computeAvgWinLossFromMarkers(prices, buyMarkers = [], sellMarkers = []) {
   if (!Array.isArray(prices) || prices.length < 2) return null;
 
-  const lots = []; // FIFO lots: { shares, price }
-  const wins = []; // { shares, pct }
-  const losses = []; // { shares, pct }
+  const lots = [];
+  const wins = [];
+  const losses = [];
 
   const toNum = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
 
@@ -574,7 +501,6 @@ function computeAvgWinLossFromMarkers(prices, buyMarkers = [], sellMarkers = [])
     }
   }
 
-  // Include remaining lots as unrealized P/L at the latest price (so "loss" isn't always 0)
   const lastPrice = toNum(prices[prices.length - 1]);
   if (lastPrice > 0 && lots.length) {
     for (const lot of lots) {
@@ -606,14 +532,11 @@ function computeAvgWinLossFromMarkers(prices, buyMarkers = [], sellMarkers = [])
 }
 
 
-// ================== API KEY HANDLING ==================
-// BT8UUAJIJ09B1IQF encoded in base64
 function getIdent() {
   const encoded = "QlQ4VVVBSklKMDlCMUlrRg==";
   return atob(encoded);
 }
 
-// ================== LOCAL STORAGE: NAME MAP ==================
 function loadNameMap() {
   let result = { ...BUILTIN_NAME_MAP };
   try {
@@ -640,7 +563,6 @@ function saveNameMap(extraMap) {
   }
 }
 
-// ================== LOCAL STORAGE: PRICE CACHE ==================
 function loadPriceCache() {
   try {
     const raw = localStorage.getItem(PRICE_CACHE_KEY);
@@ -664,7 +586,6 @@ function getCachedPricesIfFresh(symbol) {
   const now = new Date();
   const afterCutoffNow = isAfterDailyRefreshCutoff();
 
-  // If it's after 1:35pm now, only use cache that was fetched after cutoff
   if (afterCutoffNow && !entry.after_cutoff_fetch) {
     return null;
   }
@@ -688,7 +609,6 @@ function savePriceCache(symbol, dates, prices) {
   }
 }
 
-// ================== LOCAL STORAGE: SAVED RESULTS ==================
 
 function loadSaved() {
   try {
@@ -696,7 +616,6 @@ function loadSaved() {
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
-      // ---- migrate legacy single-mode saves to modes.precise ----
       let changed = false;
       for (const sym of Object.keys(parsed)) {
         const rec = parsed[sym];
@@ -704,7 +623,6 @@ function loadSaved() {
 
         if (!rec.modes) rec.modes = {};
 
-        // Legacy format: thresholds at top-level -> treat as Precise cache
         const hasLegacyThresholds =
           typeof rec.sell_pct_thresh === "number" &&
           isFinite(rec.sell_pct_thresh) &&
@@ -748,7 +666,6 @@ function loadSaved() {
             calc_used: rec.calc_used || "Precise (legacy cached thresholds)",
             updated_at: rec.updated_at || null
           };
-          // Keep a hint about what the last visible numbers represent
           rec.last_run_mode = rec.last_run_mode || MODE_PRECISE;
           changed = true;
         }
@@ -758,7 +675,6 @@ function loadSaved() {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
         } catch (e) {
-          // ignore save failures
         }
       }
       return parsed;
@@ -778,10 +694,6 @@ function saveSaved(obj) {
 }
 
 
-// ================== RELOAD ALL SAVED (APPLY EXISTING CALCS TO LATEST PRICES) ==================
-// This does NOT re-optimize. It re-runs each stock using its cached thresholds/settings
-// (Precise preferred; otherwise Quick) and updates only the outputs (profit/decision/last price).
-// getStockData() already checks per-stock cache before making an API call.
 
 function pickPreferredSavedMode(rec) {
   const modes = rec && rec.modes ? rec.modes : {};
@@ -826,7 +738,6 @@ function runUsingExistingCalcs(prices, modeKey, modeRec) {
     options
   );
 
-  // carry forward tuned params for saving consistency
   res.start_wallet = startWallet;
   res.sell_pct_thresh = modeRec.sell_pct_thresh;
   res.buy_pct_thresh = modeRec.buy_pct_thresh;
@@ -840,7 +751,6 @@ function runUsingExistingCalcs(prices, modeKey, modeRec) {
   res.regime_trend_days = options.regimeTrendDays;
   res.regime_range_pct = options.regimeRangePct;
 
-  // Convert executed-trade output into the wallet-independent, sized signal for UI/saving.
   const execDecision = res.last_decision;
   const execAmount = res.last_amount;
 
@@ -868,7 +778,6 @@ function runUsingExistingCalcs(prices, modeKey, modeRec) {
 
   res.signal_size = signal.size || null;
 
-  // High-only action: only show/save BUY/SELL when strength is HIGH; otherwise HOLD.
   res.last_decision = finalDecision;
   res.last_amount = "";
   res.last_action_price = res.last_price;
@@ -882,14 +791,12 @@ function updateSavedRunOutputs(savedObj, sym, modeKey, newRes) {
 
   const modeRec = rec.modes[modeKey];
 
-  // Update outputs only
   modeRec.profit = newRes.profit;
   modeRec.last_decision = newRes.last_decision;
   modeRec.last_amount = newRes.last_amount;
   modeRec.last_action_price = newRes.last_action_price;
   modeRec.last_price = newRes.last_price;
 
-  // Extra debug/signal fields
   modeRec.exec_last_decision = newRes.exec_last_decision || null;
   modeRec.exec_last_amount = (typeof newRes.exec_last_amount === "number") ? newRes.exec_last_amount : null;
   modeRec.signal_score = (typeof newRes.signal_score === "number") ? newRes.signal_score : null;
@@ -898,7 +805,6 @@ function updateSavedRunOutputs(savedObj, sym, modeKey, newRes) {
 
   rec.modes[modeKey] = modeRec;
 
-  // Refresh top-level compatibility fields (Precise preferred)
   const displayMode = rec.modes[MODE_PRECISE] ? MODE_PRECISE : (rec.modes[MODE_QUICK] ? MODE_QUICK : modeKey);
   const displayRec = rec.modes[displayMode] || modeRec;
 
@@ -948,7 +854,6 @@ async function reloadAllSavedSymbolsApplyOnly() {
     setStatus(`Reloading ${total} saved symbol(s)...`);
     setProgress(0, `Reloading ${total} symbol(s)...`, { raw: true, scope: "reloadAll" });
 
-    // Start each symbol after RELOAD_ALL_STAGGER_MS, without waiting for the prior one to finish.
     const tasks = symbols.map((sym, idx) => {
       return new Promise((resolve) => {
         setTimeout(async () => {
@@ -958,7 +863,6 @@ async function reloadAllSavedSymbolsApplyOnly() {
             const modes = rec && rec.modes ? rec.modes : null;
             if (!modes) throw new Error("Missing modes for saved symbol.");
 
-            // Prefer Precise if it exists; otherwise use Quick if it exists.
             const modeKey = modes[MODE_PRECISE] ? MODE_PRECISE : (modes[MODE_QUICK] ? MODE_QUICK : null);
             if (!modeKey) throw new Error("No cached mode found.");
 
@@ -967,12 +871,10 @@ async function reloadAllSavedSymbolsApplyOnly() {
               throw new Error("Missing cached thresholds.");
             }
 
-            // Fetch fresh prices (may hit cache)
             const data = await getStockData(upper);
             const prices = data && Array.isArray(data.prices) ? data.prices : [];
             if (!prices.length) throw new Error("No price data.");
 
-            // Rerun using existing calcs (fast)
             const newRes = runUsingExistingCalcs(prices, modeKey, modeRec);
             newRes.calc_used = modeRec.calc_used || `Using cached ${modeKey} settings`;
             newRes.updated_at = new Date().toISOString();
@@ -980,7 +882,6 @@ async function reloadAllSavedSymbolsApplyOnly() {
 
             updateSavedRunOutputs(saved, upper, modeKey, newRes);
 
-            // re-render list as each stock completes
             renderSavedList();
           } catch (e) {
             console.warn(`[Reload all] ${upper} failed:`, e);
@@ -1018,7 +919,6 @@ function renderSavedList() {
     return;
   }
 
-  // Build records with computed profit % upfront (prefer Precise whenever present)
   const records = symbols.map((sym) => {
     const rec = saved[sym] || {};
     const modes = (rec && typeof rec === "object" && rec.modes) ? rec.modes : {};
@@ -1055,7 +955,6 @@ function renderSavedList() {
     };
   });
 
-  // Sort: action first, then by profit%
   records.sort((a, b) => {
     if (a._isAction !== b._isAction) return a._isAction ? -1 : 1;
     return (b._profitPct || 0) - (a._profitPct || 0);
@@ -1068,7 +967,6 @@ function renderSavedList() {
 
     const profit = (displayRec && typeof displayRec.profit === "number") ? displayRec.profit : 0;
 
-    // Prefer freshest price from the daily price cache (so list updates even if calcs are not re-saved)
     let lastPrice = (displayRec && typeof displayRec.last_price === "number") ? displayRec.last_price : 0;
     try {
       const cached = getCachedPricesIfFresh(sym);
@@ -1077,7 +975,6 @@ function renderSavedList() {
         if (typeof p === "number" && isFinite(p)) lastPrice = p;
       }
     } catch (e) {
-      // ignore cache read issues
     }
 
     const profitPct = rec._profitPct || 0;
@@ -1158,12 +1055,11 @@ function markCurrentSymbol(symbol) {
   });
 }
 
-// ================== SYMBOL RESOLUTION ==================
 async function searchSymbolAlpha(query) {
-  const apiKey = getIdent();
+  const identRFID = getIdent();
   const url = `https://www.alphavantage.co/query?function=SYMBOL_SEARCH&keywords=${encodeURIComponent(
     query
-  )}&apikey=${encodeURIComponent(apiKey)}`;
+  )}&apikey=${encodeURIComponent(identRFID)}`;
 
   const data = await fetchJson(url);
   if (!data || !Array.isArray(data.bestMatches)) {
@@ -1216,14 +1112,12 @@ async function resolveSymbol(inputStr) {
   return res;
 }
 
-// ================== PRICE FETCHING ==================
 async function fetchStockDataFromApi(symbol) {
-  const apiKey = getIdent();
+  const identRFID = getIdent();
   const baseUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(
     symbol
-  )}&apikey=${encodeURIComponent(apiKey)}`;
+  )}&apikey=${encodeURIComponent(identRFI)}`;
 
-  // Try compact history first
   let url = baseUrl + "&outputsize=compact";
   let data = await fetchJson(url);
 
@@ -1233,7 +1127,6 @@ async function fetchStockDataFromApi(symbol) {
     typeof info === "string" &&
     info.toLowerCase().includes("outputsize=compact")
   ) {
-    // fall back to compact
     console.warn("outputsize=compact is premium; retrying with compact");
     url = baseUrl + "&outputsize=compact";
     data = await fetchJson(url);
@@ -1256,7 +1149,6 @@ async function fetchStockDataFromApi(symbol) {
     price: parseFloat(daily["4. close"])
   }));
 
-  // sort oldest → newest
   entries.sort((a, b) => (a.dateStr < b.dateStr ? -1 : 1));
 
   const dates = entries.map((e) => e.dateStr);
@@ -1291,7 +1183,7 @@ function biasedTrader(
 ) {
   if (!prices || prices.length === 0) {
     return {
-      start_wallet: startWallet,         // ← add this
+      start_wallet: startWallet,
       final_wallet: startWallet,
       final_shares: [],
       final_value: startWallet,
@@ -1383,11 +1275,6 @@ function biasedTrader(
       ? options.regimeRangePct
       : REGIME_RANGE_PCT
   );
-
-  // ===== New: Causal smoothing + noise/curve-aware scaling (NO lookahead) =====
-  // These affect the *decision logic only*. Trades still execute at the real daily close.
-  // - smoothAlpha: EMA alpha. Higher = more reactive (less smooth). Lower = smoother.
-  // - smoothMix: 0 = raw-only decisions, 1 = fully-smoothed decisions, in-between blends.
   const smoothAlpha = clamp(
     typeof options.smoothAlpha === "number" ? options.smoothAlpha : 0.35,
     0.05,
@@ -1398,9 +1285,6 @@ function biasedTrader(
     0.0,
     1.0
   );
-
-  // Noise settings: measure average abs daily % move over the last N days.
-  // When noise is high, we get more conservative (need bigger dips to buy, smaller sizing).
   const noiseWindowDays = Math.max(
     2,
     Math.floor(
@@ -1416,9 +1300,6 @@ function biasedTrader(
     0.0,
     2.0
   );
-
-  // Curve settings: use smoothed slope + acceleration to avoid catching falling knives
-  // and to hold winners a bit longer in strong uptrends.
   const curveSensitivity = clamp(
     typeof options.curveSensitivity === "number" ? options.curveSensitivity : 0.9,
     0.0,
@@ -1438,8 +1319,7 @@ function biasedTrader(
     0.1,
     typeof options.curveCurvPct === "number" ? options.curveCurvPct : 1.5
   );
-  // ===== New: Weekly (5-trading-day) stats =====
-  const weeklyDays = 5; // treat 5 trading days as a "week"
+  const weeklyDays = 5;
 
   const weeklyReturnThreshPct = Math.max(
     0.5,
@@ -1450,32 +1330,23 @@ function biasedTrader(
     1.0,
     typeof options.weeklyRangeTargetPct === "number" ? options.weeklyRangeTargetPct : 6.0
   );
-
-  // how much weekly trend influences thresholds/sizing
   const weeklyTrendWeight = clamp(
     typeof options.weeklyTrendWeight === "number" ? options.weeklyTrendWeight : 0.7,
     0.0, 2.0
   );
-
-  // how much weekly "near-high/near-low" mean-reversion influences thresholds
   const weeklyReversionWeight = clamp(
     typeof options.weeklyReversionWeight === "number" ? options.weeklyReversionWeight : 0.55,
     0.0, 2.0
   );
-
-  // reduce aggression in very wide weekly ranges (optional)
   const weeklyVolPenaltyWeight = clamp(
     typeof options.weeklyVolPenaltyWeight === "number" ? options.weeklyVolPenaltyWeight : 0.35,
     0.0, 2.0
   );
-
-  // breakout rule: if today breaks above prior week's high by this %, hold winners longer
   const weeklyBreakoutPct = Math.max(
     0.0,
     typeof options.weeklyBreakoutPct === "number" ? options.weeklyBreakoutPct : 1.0
   );
 
-  // Precompute causal EMA + blended "decision price" series (still no lookahead).
   const smoothPrices = new Array(prices.length);
   const decisionPrices = new Array(prices.length);
 
@@ -1495,20 +1366,17 @@ function biasedTrader(
     const s = prevS * (1 - smoothAlpha) + raw * smoothAlpha;
     smoothPrices[i] = s;
 
-    // Blend raw + smoothed for decisions (lets you avoid "too smooth")
     decisionPrices[i] = raw * (1 - smoothMix) + s * smoothMix;
   }
 
   let wallet = startWallet;
 
-  // each lot: { buyPrice, buyDecisionPrice, amount, buyIndex, isLong }
   let lots = [];
 
   let lastDecision = "HOLD";
   let lastAmount = 0;
   let lastActionPrice = 0;
 
-  // optional arrays for chart + debug
   let equityCurve = null;
   let buyMarkers = null;
   let sellMarkers = null;
@@ -1539,7 +1407,6 @@ function biasedTrader(
     lastAmount = 0;
     lastActionPrice = 0;
 
-    // ===== Regime scaling (multi-day range + trend) =====
     const wStart = Math.max(0, i - regimeWindowDays);
     let wMin = Infinity;
     let wMax = -Infinity;
@@ -1564,7 +1431,7 @@ function biasedTrader(
     const trendPct = tRef > 0 ? ((dPrice - tRef) / tRef) * 100 : 0;
 
     const rangeStrength =
-      clamp((rangePct - regimeRangePct) / regimeRangePct, 0, 2) / 2; // 0..1
+      clamp((rangePct - regimeRangePct) / regimeRangePct, 0, 2) / 2;
     const posHighStrength = clamp((posInRange - 0.75) / 0.25, 0, 1);
     const posLowStrength = clamp((0.25 - posInRange) / 0.25, 0, 1);
     const trendUpStrength =
@@ -1577,7 +1444,6 @@ function biasedTrader(
     const oversoldStrength =
       rangeStrength * Math.max(posLowStrength, trendDownStrength);
 
-    // Adjust thresholds and position sizing dynamically.
     let effSellPctThresh = sellPctThresh;
     let effBuyPctThresh = buyPctThresh;
     let effPositionScale = positionScale;
@@ -1606,7 +1472,6 @@ function biasedTrader(
       );
     }
 
-    // ===== New: Noise-aware scaling =====
     const nStart = Math.max(1, i - noiseWindowDays + 1);
     let absSum = 0;
     let absN = 0;
@@ -1620,7 +1485,7 @@ function biasedTrader(
     }
     const noisePct = absN > 0 ? absSum / absN : 0;
     const noiseStrength =
-      clamp((noisePct - noiseTargetPct) / noiseTargetPct, 0, 2) / 2; // 0..1
+      clamp((noisePct - noiseTargetPct) / noiseTargetPct, 0, 2) / 2;
 
     if (noiseStrength > 0) {
       effBuyPctThresh = Math.max(
@@ -1638,7 +1503,6 @@ function biasedTrader(
       );
     }
 
-    // ===== New: Curve-aware scaling =====
     const cIdx = Math.max(0, i - curveTrendDays);
     const cRef = decisionPrices[cIdx];
     const slopePct = cRef > 0 ? ((dPrice - cRef) / cRef) * 100 : 0;
@@ -1697,9 +1561,7 @@ function biasedTrader(
         4.0
       );
     }
-    // ===== Weekly (5 trading day) features: trend + range position + breakout =====
     if (i >= weeklyDays) {
-      // current week window: (i-4..i)
       const w0 = Math.max(0, i - (weeklyDays - 1));
       let weekHigh = -Infinity, weekLow = Infinity;
       for (let j = w0; j <= i; j++) {
@@ -1716,65 +1578,47 @@ function biasedTrader(
 
       const weekRange = weekHigh - weekLow;
       const weekRangePct = weekLow > 0 ? (weekRange / weekLow) * 100 : 0;
-      const weekPos = weekRange > 0 ? (dPrice - weekLow) / weekRange : 0.5; // 0..1
+      const weekPos = weekRange > 0 ? (dPrice - weekLow) / weekRange : 0.5;
 
       const ref = decisionPrices[i - weeklyDays];
       const weekRetPct = (ref > 0) ? ((dPrice - ref) / ref) * 100 : 0;
 
-      // Normalize strengths 0..1
-      const trendStrength = clamp(Math.abs(weekRetPct) / weeklyReturnThreshPct, 0, 2) / 2; // 0..1
-      const rangeStrength = clamp(weekRangePct / weeklyRangeTargetPct, 0, 2) / 2;          // 0..1
+      const trendStrength = clamp(Math.abs(weekRetPct) / weeklyReturnThreshPct, 0, 2) / 2;
+      const rangeStrength = clamp(weekRangePct / weeklyRangeTargetPct, 0, 2) / 2;
 
-      // Trend bias: strong up week => hold winners longer + prefer buying dips
-      // strong down week => sell sooner + avoid buying
       if (trendStrength > 0) {
         if (weekRetPct > 0) {
-          // Up week:
-          // - Raise sell threshold a bit (hold winners longer)
-          // - Slightly lower buy threshold (allow buys on dips inside uptrend)
-          // - Slightly increase position scale
-          const amt = weeklyTrendWeight * 0.18 * trendStrength; // tune
+          const amt = weeklyTrendWeight * 0.18 * trendStrength;
           effSellPctThresh = Math.max(0.5, effSellPctThresh * (1 + amt));
           effBuyPctThresh  = Math.max(0.5, effBuyPctThresh  * (1 - 0.35 * amt));
           effPositionScale = clamp(effPositionScale * (1 + 0.25 * amt), 0.25, 4.0);
         } else {
-          // Down week:
-          // - Lower sell threshold (exit quicker)
-          // - Raise buy threshold (avoid catching falling knife)
-          // - Reduce position scale
-          const amt = weeklyTrendWeight * 0.22 * trendStrength; // tune
+          const amt = weeklyTrendWeight * 0.22 * trendStrength;
           effSellPctThresh = Math.max(0.5, effSellPctThresh * (1 - 0.55 * amt));
           effBuyPctThresh  = Math.max(0.5, effBuyPctThresh  * (1 + amt));
           effPositionScale = clamp(effPositionScale * (1 - 0.7 * amt), 0.25, 4.0);
         }
       }
 
-      // Mean-reversion inside the weekly range:
-      // near weekly high => more willing to sell; near weekly low => more willing to buy
       if (rangeStrength > 0) {
-        const centerBias = (weekPos - 0.5) * 2; // -1..+1
-        const amt = weeklyReversionWeight * 0.20 * rangeStrength; // tune
+        const centerBias = (weekPos - 0.5) * 2;
+        const amt = weeklyReversionWeight * 0.20 * rangeStrength;
 
         if (centerBias > 0) {
-          // near highs: sell easier, buy harder
           effSellPctThresh = Math.max(0.5, effSellPctThresh * (1 - amt * centerBias));
           effBuyPctThresh  = Math.max(0.5, effBuyPctThresh  * (1 + 0.6 * amt * centerBias));
         } else if (centerBias < 0) {
-          // near lows: buy easier, sell harder
           effBuyPctThresh  = Math.max(0.5, effBuyPctThresh  * (1 - amt * (-centerBias)));
           effSellPctThresh = Math.max(0.5, effSellPctThresh * (1 + 0.45 * amt * (-centerBias)));
         }
       }
 
-      // Weekly volatility penalty (optional): very wide weekly ranges => reduce sizing
       if (weeklyVolPenaltyWeight > 0 && weekRangePct > weeklyRangeTargetPct) {
-        const volStr = clamp((weekRangePct - weeklyRangeTargetPct) / weeklyRangeTargetPct, 0, 2) / 2; // 0..1
+        const volStr = clamp((weekRangePct - weeklyRangeTargetPct) / weeklyRangeTargetPct, 0, 2) / 2;
         const mult = 1 + weeklyVolPenaltyWeight * 1.2 * volStr;
         effPositionScale = clamp(effPositionScale / mult, 0.25, 4.0);
       }
 
-      // Breakout rule (prior week high, past-only):
-      // compare today to max of (i-5..i-1)
       if (weeklyBreakoutPct > 0 && i >= weeklyDays + 1) {
         let prevHigh = -Infinity;
         for (let j = i - weeklyDays; j <= i - 1; j++) {
@@ -1784,14 +1628,12 @@ function biasedTrader(
         if (isFinite(prevHigh) && prevHigh > 0) {
           const brokeOut = dPrice > prevHigh * (1 + weeklyBreakoutPct / 100);
           if (brokeOut) {
-            // hold winners longer during breakout (discourage premature sells)
             effSellPctThresh = Math.max(0.5, effSellPctThresh * 1.18);
           }
         }
       }
     }
 
-    // ========== SELL PHASE ==========
     if (lots.length) {
       const hasShortLots = lots.some((lot) => !lot.isLong);
 
@@ -1809,7 +1651,6 @@ function biasedTrader(
         const heldDays = i - lot.buyIndex;
         if (requiredHold > 0 && heldDays < requiredHold) continue;
 
-        // long-term lots only sell if there are NO short-term lots
         if (lot.isLong && hasShortLots) continue;
 
         const signalProfitPct =
@@ -1827,7 +1668,6 @@ function biasedTrader(
       }
     }
 
-    // ========== BUY PHASE ==========
     if (wallet > rawPrice) {
       let highestPercent = 0.0;
       const maxBack = clamp(maxLookbackDays + 1, 1, i);
@@ -1886,7 +1726,6 @@ function biasedTrader(
       }
     }
 
-    // ========== TRACK CURVE & SERIES ==========
     if (trackCurve) {
       const totalShares = lots.reduce((acc, lot) => acc + lot.amount, 0);
       const totalVal = wallet + totalShares * rawPrice;
@@ -1934,7 +1773,6 @@ function biasedTrader(
     regime_trend_days: regimeTrendDays,
     regime_range_pct: regimeRangePct,
 
-    // (optional) debug fields
     smooth_alpha: smoothAlpha,
     smooth_mix: smoothMix,
     noise_window_days: noiseWindowDays,
@@ -1947,10 +1785,6 @@ function biasedTrader(
   };
 }
 
-// ================== SIGNAL (WALLET-INDEPENDENT) DECISION + SIZING ==================
-// This decouples the "signal" (BUY/SELL/HOLD + Low/Med/High) from whether the backtest
-// actually had wallet available to execute that trade. This fixes the "wallet=0 => HOLD"
-// issue while still using the optimized thresholds/settings from the simulations.
 
 const SIZE_LOW = "LOW";
 const SIZE_MED = "MEDIUM";
@@ -2009,7 +1843,7 @@ function computeRegimeAtIndex(prices, i, baseParams) {
   const tRef = prices[tIdx];
   const trendPct = tRef > 0 ? ((price - tRef) / tRef) * 100 : 0;
 
-  const rangeStrength = clamp((rangePct - regimeRangePct) / regimeRangePct, 0, 2) / 2; // 0..1
+  const rangeStrength = clamp((rangePct - regimeRangePct) / regimeRangePct, 0, 2) / 2;
   const posHighStrength = clamp((posInRange - 0.75) / 0.25, 0, 1);
   const posLowStrength = clamp((0.25 - posInRange) / 0.25, 0, 1);
   const trendUpStrength = clamp((trendPct - regimeRangePct) / regimeRangePct, 0, 2) / 2;
@@ -2112,7 +1946,6 @@ function computeSignalSizedDecision(prices, bestParams, portfolioSnap = null) {
 
   const regime = computeRegimeAtIndex(prices, i, bestParams);
 
-  // Look at a recent window for extremes (separate from regime window; this is "latest trend")
   const signalWindow = Math.max(10, Math.min(45, Math.floor((bestParams.regime_window_days ?? REGIME_WINDOW_DAYS) * 1.5)));
   const start = Math.max(0, i - signalWindow);
 
@@ -2137,7 +1970,6 @@ function computeSignalSizedDecision(prices, bestParams, portfolioSnap = null) {
     sellScore = (riseFromLowPct - regime.effSellPctThresh) / Math.max(0.5, regime.effSellPctThresh);
   }
 
-  // Boost score based on regime context + trend direction
   buyScore *= (1 + 0.80 * regime.oversoldStrength);
   sellScore *= (1 + 0.80 * regime.overextendedStrength);
 
@@ -2189,7 +2021,6 @@ function computeSignalSizedDecision(prices, bestParams, portfolioSnap = null) {
   };
 }
 
-// Build equity curve for chosen thresholds by re-running strategy on prefixes
 function buildEquityCurve(
   prices,
   sellPctThresh,
@@ -2225,13 +2056,12 @@ function buildEquityCurve(
 
 async function gridSearchThresholdsWithProgress(
   prices,
-  startWallet, // kept for compatibility, not used
+  startWallet,
   onProgress
 ) {
   const sellValues = [];
   const buyValues = [];
 
-  // 1.0% .. 25.0% in 0.5% steps
   for (let i = 10; i <= 250; i += 5) {
     const v = i / 10.0;
     sellValues.push(v);
@@ -2243,11 +2073,10 @@ async function gridSearchThresholdsWithProgress(
   const longTermRatios = [0.0, 0.25, 0.5];
   const longTermHoldDays = [0, 10, 20];
 
-  // ----- binary-search-style wallet optimization -----
   const MIN_WALLET = 100;
   const MAX_WALLET = 10000;
-  const WALLET_STEP = 100;      // resolution ≈ $100
-  const MAX_WALLET_EVALS = 30;  // rough upper bound per param set
+  const WALLET_STEP = 100;
+  const MAX_WALLET_EVALS = 30;
 
   const totalParamCombos =
     sellValues.length *
@@ -2340,7 +2169,6 @@ async function gridSearchThresholdsWithProgress(
     let low = MIN_WALLET;
     let high = MAX_WALLET;
 
-    // start in the middle of the range
     let mid = (low + high) / 2;
     let bestWallet = snapWallet(mid);
     let bestPct = await evalWallet(
@@ -2353,15 +2181,15 @@ async function gridSearchThresholdsWithProgress(
       ltHold
     );
 
-    const MAX_ITERS = 10;            // max binary-search steps
-    const MAX_NO_IMPROVEMENT = 3;    // stop after 3 steps with no better profit
+    const MAX_ITERS = 10;
+    const MAX_NO_IMPROVEMENT = 3;
     let noImprovementCount = 0;
 
     for (let iter = 0; iter < MAX_ITERS && high - low > 2 * WALLET_STEP; iter++) {
-      const beforeBestPct = bestPct; // remember current best for this param combo
+      const beforeBestPct = bestPct;
 
-      const left = (low + mid) / 2;   // e.g. 2.5k when mid is 5k
-      const right = (mid + high) / 2; // e.g. 7.5k when mid is 5k
+      const left = (low + mid) / 2;
+      const right = (mid + high) / 2;
 
       const leftPct = await evalWallet(
         left,
@@ -2382,38 +2210,31 @@ async function gridSearchThresholdsWithProgress(
         ltHold
       );
 
-      // pick the best of left / mid / right and shrink around it
       if (leftPct >= bestPct && leftPct >= rightPct) {
-        // best is on the left side
         high = mid;
         mid = left;
         bestPct = leftPct;
         bestWallet = snapWallet(left);
       } else if (rightPct >= bestPct && rightPct >= leftPct) {
-        // best is on the right side
         low = mid;
         mid = right;
         bestPct = rightPct;
         bestWallet = snapWallet(right);
       } else {
-        // middle is still best -> narrow around it
         low = left;
         high = right;
-        // mid stays where it is, bestPct unchanged
       }
 
-      // === early stop: no better wallet for 3 binary steps ===
       if (bestPct <= beforeBestPct + 1e-9) {
         noImprovementCount++;
         if (noImprovementCount >= MAX_NO_IMPROVEMENT) {
           break;
         }
       } else {
-        noImprovementCount = 0; // reset streak if we found an improvement
+        noImprovementCount = 0;
       }
     }
 
-    // Final sweep around the best wallet (≈ ±$300) in $100 steps
     const sweepLow = Math.max(MIN_WALLET, bestWallet - 300);
     const sweepHigh = Math.min(MAX_WALLET, bestWallet + 300);
     for (let w = sweepLow; w <= sweepHigh; w += WALLET_STEP) {
@@ -2421,7 +2242,6 @@ async function gridSearchThresholdsWithProgress(
     }
   }
 
-  // ----- loop over all threshold combinations, binary-searching wallet each time -----
   for (const sellThresh of sellValues) {
     for (const buyThresh of buyValues) {
       for (const posScale of positionScales) {
@@ -2443,7 +2263,6 @@ async function gridSearchThresholdsWithProgress(
     }
   }
 
-  // make sure the progress bar finishes
   onProgress(100);
 
   return bestResult;
@@ -2457,7 +2276,6 @@ async function gridSearchThresholdsFixedWalletWithProgress(
   const sellValues = [];
   const buyValues = [];
 
-  // 1.0% .. 25.0% in 0.5% steps
   for (let i = 10; i <= 250; i += 5) {
     const v = i / 10.0;
     sellValues.push(v);
@@ -2515,7 +2333,6 @@ async function gridSearchThresholdsFixedWalletWithProgress(
                   longTermRatio: ltRatio,
                   longTermMinHoldDays: ltHold,
 
-                  // new regime scaling (kept fixed unless you later decide to grid-search it)
                   regimeSensitivity: REGIME_SENS_DEFAULT,
                   regimeWindowDays: REGIME_WINDOW_DAYS,
                   regimeTrendDays: REGIME_TREND_DAYS,
@@ -2540,7 +2357,6 @@ async function gridSearchThresholdsFixedWalletWithProgress(
                   long_term_min_hold_days: ltHold,
                   start_wallet: fixedWallet,
 
-                  // mirror regime fields for saving/display
                   regime_sensitivity: REGIME_SENS_DEFAULT,
                   regime_window_days: REGIME_WINDOW_DAYS,
                   regime_trend_days: REGIME_TREND_DAYS,
@@ -2580,7 +2396,7 @@ function updateChart(
       data: prices,
       borderWidth: 1.5,
       pointRadius: 0,
-      borderColor: "#3b82f6", // blue
+      borderColor: "#3b82f6",
       backgroundColor: "rgba(59,130,246,0.15)",
       tension: 0.15
     }
@@ -2628,7 +2444,6 @@ function updateChart(
         };
       });
 
-      // BUY circles
       datasets.push({
         type: "scatter",
         label: "Buys",
@@ -2651,7 +2466,6 @@ function updateChart(
         }
       });
 
-      // SELL crosses
       datasets.push({
         type: "scatter",
         label: "Sells",
@@ -2677,12 +2491,11 @@ function updateChart(
     }
   }
 
-  // Wallet dataset
   datasets.push({
     label: "Wallet",
     data: walletSeries,
     type: "line",
-    yAxisID: "yHidden",     // 👈 important
+    yAxisID: "yHidden",
     borderWidth: 0,
     pointRadius: 0,
     hitRadius: 0,
@@ -2690,12 +2503,11 @@ function updateChart(
     borderColor: "rgba(0,0,0,0)"
   });
 
-  // Shares dataset
   datasets.push({
     label: "Shares",
     data: sharesHeld,
     type: "line",
-    yAxisID: "yHidden",     // 👈 important
+    yAxisID: "yHidden",
     borderWidth: 0,
     pointRadius: 0,
     hitRadius: 0,
@@ -2722,14 +2534,13 @@ function updateChart(
         legend: {
           labels: {
             color: "#e5e7eb",
-            // hide Wallet / Shares from legend
             filter: (item) =>
               item.text !== "Wallet" && item.text !== "Shares"
           }
         },
 
         tooltip: {
-          position: "dynamicSide",   // 👈 important
+          position: "dynamicSide",
           mode: "index",
           intersect: false,
           displayColors: false,
@@ -2739,7 +2550,6 @@ function updateChart(
           yAlign: "center",
           caretPadding: 10,
 
-          // order: price/sim lines -> buy/sell -> wallet -> shares
           itemSort: function (a, b) {
             const la = a.dataset.label || "";
             const lb = b.dataset.label || "";
@@ -2751,13 +2561,11 @@ function updateChart(
             const isSharesA = la === "Shares";
             const isSharesB = lb === "Shares";
 
-            // group 0 = price/sim, 1 = markers, 2 = wallet, 3 = shares
             const groupA = isSharesA ? 3 : isWalletA ? 2 : isMarkerA ? 1 : 0;
             const groupB = isSharesB ? 3 : isWalletB ? 2 : isMarkerB ? 1 : 0;
 
             if (groupA !== groupB) return groupA - groupB;
 
-            // for price/sim group, sort by value (higher first)
             const ya = a.parsed && isFinite(a.parsed.y) ? a.parsed.y : -Infinity;
             const yb = b.parsed && isFinite(b.parsed.y) ? b.parsed.y : -Infinity;
             return yb - ya;
@@ -2767,33 +2575,30 @@ function updateChart(
             labelTextColor: function (context) {
               const lbl = context.dataset.label || "";
 
-              if (lbl === "Simulation value") return "#22c55e";   // green
-              if (lbl.endsWith(" Price"))     return "#3b82f6";   // blue
-              if (lbl === "Buys")             return "#22c55e";   // green
-              if (lbl === "Sells")            return "#ef4444";   // red
-              if (lbl === "Wallet")           return "#e5e7eb";   // white
-              if (lbl === "Shares")           return "#e5e7eb";   // white
+              if (lbl === "Simulation value") return "#22c55e";
+              if (lbl.endsWith(" Price"))     return "#3b82f6";
+              if (lbl === "Buys")             return "#22c55e";
+              if (lbl === "Sells")            return "#ef4444";
+              if (lbl === "Wallet")           return "#e5e7eb";
+              if (lbl === "Shares")           return "#e5e7eb";
               return "#e5e7eb";
             },
 
             label: function (context) {
               const dsLabel = context.dataset.label || "";
 
-              // Wallet line
               if (dsLabel === "Wallet") {
                 const v = context.parsed && context.parsed.y;
                 if (!isFinite(v)) return "";
                 return `Wallet: ${formatMoney(v, false)}`;
               }
 
-              // Shares line
               if (dsLabel === "Shares") {
                 const v = context.parsed && context.parsed.y;
                 if (!isFinite(v)) return "";
                 return `Shares: ${Math.round(v)}`;
               }
 
-              // Buy / Sell markers
               if (dsLabel === "Buys" || dsLabel === "Sells") {
                 const raw = context.raw || {};
                 const shares = raw.shares != null ? raw.shares : 0;
@@ -2802,7 +2607,6 @@ function updateChart(
                 return `${action} ${shares} shares`;
               }
 
-              // Lines (price + simulation)
               const v = context.parsed.y;
               return `${dsLabel}: ${formatMoney(v, false)}`;
             }
@@ -2832,7 +2636,6 @@ function updateChart(
             color: "rgba(148,163,184,0.2)"
           }
         },
-        // visible axis for Price + Simulation only
         y: {
           position: "left",
           beginAtZero: false,
@@ -2842,16 +2645,15 @@ function updateChart(
               const v = typeof value === "number" ? value : Number(value);
               if (!isFinite(v)) return "";
               const rounded = Math.round(v);
-              return "$" + rounded.toString(); // ONLY price/sim formatting
+              return "$" + rounded.toString();
             }
           },
           grid: {
             color: "rgba(148,163,184,0.2)"
           }
         },
-        // completely hidden axis for Wallet + Shares (tooltips only)
         yHidden: {
-          display: false,        // no axis line / labels
+          display: false,
           grid: { display: false },
           ticks: {
             display: false
@@ -2863,7 +2665,6 @@ function updateChart(
   });
 }
 
-// Save the best simulation result for a symbol into localStorage
 
 function saveBestResult(symbol, result, { mode = MODE_PRECISE, calcUsed = "" } = {}) {
   const sym = (symbol || "").toUpperCase();
@@ -2879,18 +2680,12 @@ function saveBestResult(symbol, result, { mode = MODE_PRECISE, calcUsed = "" } =
 
   const hasPreciseAlready = !!prev.modes[MODE_PRECISE];
 
-  // Per request:
-  // - Always save Precise (and store the date).
-  // - Only save Quick if there is NO Precise cache for this symbol.
-  // - Keep any existing Quick in localStorage (do not delete it), but don't overwrite it once Precise exists.
   if (modeKey === MODE_QUICK && hasPreciseAlready) {
-    // Still ensure the symbol exists in saved (don’t lose starred state), but do not overwrite cached calcs.
     saved[sym] = {
       ...(saved[sym] || {}),
       symbol: sym,
       modes: prev.modes,
       starred: prevStar,
-      // Prefer Precise as the default "display" mode when it exists
       last_run_mode: MODE_PRECISE,
       calc_used: (prev.modes[MODE_PRECISE] && prev.modes[MODE_PRECISE].calc_used) || prev.calc_used || "Precise"
     };
@@ -2943,39 +2738,32 @@ function saveBestResult(symbol, result, { mode = MODE_PRECISE, calcUsed = "" } =
     curve_lookback_days: (typeof result.curve_lookback_days === "number" ? result.curve_lookback_days : CURVE_LOOKBACK_DAYS_DEFAULT),
     curve_weight: (typeof result.curve_weight === "number" ? result.curve_weight : CURVE_WEIGHT_DEFAULT),
 
-    // Debug/extra: keep last EXECUTED trade from the backtest (wallet-dependent)
     exec_last_decision: result.exec_last_decision || null,
     exec_last_amount: (typeof result.exec_last_amount === "number" ? result.exec_last_amount : null),
 
-    // Signal strength metadata (wallet-independent)
     signal_score: (typeof result.signal_score === "number" && isFinite(result.signal_score)) ? result.signal_score : null,
     signal_reason: result.signal_reason || null,
     signal_suggested_shares: (typeof result.signal_suggested_shares === "number" ? result.signal_suggested_shares : null),
     calc_used: calcUsed || (modeKey === MODE_QUICK ? "Quick" : "Precise"),
     updated_at: Date.now(),
-    // Requested: store the date the calculation was made (especially for Precise)
     updated_date: modeKey === MODE_PRECISE ? todayISO() : (result.updated_date || null)
   };
 
   prev.modes[modeKey] = modeRecord;
 
-  // Prefer Precise for the top-level "display" fields whenever it exists.
   const displayModeKey = prev.modes[MODE_PRECISE] ? MODE_PRECISE : modeKey;
   const displayRec = prev.modes[displayModeKey] || modeRecord;
 
-  // Top-level compatibility fields (used by saved list sorting / display)
   saved[sym] = {
     symbol: sym,
     modes: prev.modes,
     starred: prevStar,
 
-    // Always prefer Precise as the "default" mode once it exists
     last_run_mode: displayModeKey,
     calc_used: displayRec.calc_used,
     updated_at: displayRec.updated_at || null,
     updated_date: displayRec.updated_date || null,
 
-    // mirror display record for backwards compatibility
     start_wallet: displayRec.start_wallet,
     sell_pct_thresh: displayRec.sell_pct_thresh,
     buy_pct_thresh: displayRec.buy_pct_thresh,
@@ -2997,7 +2785,6 @@ function saveBestResult(symbol, result, { mode = MODE_PRECISE, calcUsed = "" } =
   saveSaved(saved);
 }
 
-// ================== MAIN RUN LOGIC ==================
 async function runForInput(
   inputValue,
   { forceReoptimize = false, mode: modeOverride = null } = {}
@@ -3005,7 +2792,7 @@ async function runForInput(
   const raw = (inputValue || "").trim();
   if (!raw) return;
 
-  let symbolUsed = null; // track which symbol we actually resolved
+  let symbolUsed = null;
   const modeKey =
     modeOverride === MODE_PRECISE || modeOverride === MODE_QUICK
       ? modeOverride
@@ -3015,7 +2802,6 @@ async function runForInput(
   setStatus("Resolving symbol...");
   setProgress(0, "Resolving symbol...");
 
-  // reset UI text
   decisionText.textContent = "–";
   decisionExtra.textContent = "";
   thresholdsText.textContent = "–";
@@ -3027,7 +2813,6 @@ async function runForInput(
     typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
 
   try {
-    // ---- resolve symbol (AAPL, etc.) ----
     const resolved = await resolveSymbol(raw);
     const symbol = resolved.symbol.toUpperCase();
     symbolUsed = symbol;
@@ -3035,13 +2820,11 @@ async function runForInput(
     setStatus(`Fetching data for ${symbol}...`);
     setProgress(5, `Fetching prices for ${symbol}...`);
 
-    // ---- prices (cached) ----
     const data = await getStockData(symbol);
     const dates = data.dates || [];
     const prices = data.prices || [];
     if (!prices.length) throw new Error("No price data returned.");
 
-    // ---- load saved thresholds/settings (mode-aware) ----
     const savedAll = loadSaved();
     const savedEntry = savedAll[symbol] || null;
 
@@ -3094,7 +2877,6 @@ async function runForInput(
           options
         );
 
-        // carry over tuned params
         bestResult.start_wallet = usedStartWalletFromSaved;
         bestResult.sell_pct_thresh = savedMode.sell_pct_thresh;
         bestResult.buy_pct_thresh = savedMode.buy_pct_thresh;
@@ -3120,10 +2902,8 @@ async function runForInput(
         calcUsed = "Precise (grid search + wallet evals)";
       }
     } else {
-      // QUICK mode: same threshold/param search as Precise, but with a single fixed wallet
       const quickWallet = QUICK_START_WALLET;
 
-      // If Quick isn't cached, fall back to using Precise cached thresholds/settings (per request: Precise is the source of truth)
       const baseSaved = savedMode || savedPrecise || null;
 
       if (baseSaved && !forceReoptimize) {
@@ -3193,7 +2973,6 @@ async function runForInput(
       throw new Error("No result from simulation.");
     }
 
-    // ---------- BUILD EQUITY CURVE & TRADE MARKERS FOR CHART ----------
     const usedStartWallet =
       typeof bestResult.start_wallet === "number" && isFinite(bestResult.start_wallet)
         ? bestResult.start_wallet
@@ -3236,10 +3015,6 @@ async function runForInput(
       usedStartWallet
     );
 
-    // ---------- DECISION TEXT (Signal-based, sized Low/Med/High) ----------
-    // NOTE: biasedTrader's last_decision/last_amount reflect the last EXECUTED trade,
-    // which can become HOLD when the simulated wallet is depleted. We compute a separate
-    // wallet-independent signal based on the optimized thresholds + latest trend.
     const portfolioSnap = {
       wallet: Array.isArray(walletSeries) && walletSeries.length ? walletSeries[walletSeries.length - 1] : bestResult.final_wallet,
       shares: Array.isArray(sharesHeld) && sharesHeld.length ? sharesHeld[sharesHeld.length - 1] : 0
@@ -3252,14 +3027,12 @@ async function runForInput(
 
     
 
-    // High-only action: only show BUY/SELL when the signal strength is HIGH; otherwise HOLD.
     const isHighStrength =
       (signal.size === SIZE_HIGH) || (String(signal.size || "").toUpperCase() === "HIGH");
     const finalDecision =
       ((signal.decision === "BUY" || signal.decision === "SELL") && isHighStrength)
         ? signal.decision
         : "HOLD";
-// Store both (debuggable), but use the signal for UI + saving.
     bestResult.exec_last_decision = execDecision;
     bestResult.exec_last_amount = execAmount;
     bestResult.signal_score = signal.score;
@@ -3268,21 +3041,17 @@ async function runForInput(
 
     bestResult.last_decision = finalDecision;
     bestResult.last_amount = "";
-    bestResult.last_action_price = bestResult.last_price; // latest price (we're signaling "now")
+    bestResult.last_action_price = bestResult.last_price;
 
-    // Display: only BUY/SELL when signal is HIGH, otherwise HOLD
     decisionText.textContent = finalDecision;
     decisionText.style.color =
       finalDecision === "BUY" ? "#4ade80" : finalDecision === "SELL" ? "#f97373" : "#9ca3af";
 
-    // show latest price; (optional) keep this simple so UI stays clean
-    // show latest price + avg win/loss from the chart simulation
     const wl = computeAvgWinLossFromMarkers(prices, buyMarkers, sellMarkers);
     if (wl && (isFinite(wl.avgWinPct) || isFinite(wl.avgLossPct))) {
       const fmtPct = (v) =>
         (typeof v === "number" && isFinite(v)) ? `${v.toFixed(2)}%` : "–";
 
-      // store for debugging / future UI use
       bestResult.avg_win_pct = wl.avgWinPct;
       bestResult.avg_loss_pct = wl.avgLossPct;
       bestResult.win_samples = wl.winSamples;
@@ -3292,11 +3061,9 @@ async function runForInput(
         `<div>$${bestResult.last_price.toFixed(2)}</div>` +
         `<div style="opacity:0.9; font-size:0.75rem;">Avg win: ${fmtPct(wl.avgWinPct)} • Avg loss: ${fmtPct(Math.abs(wl.avgLossPct))}</div>`;
     } else {
-      // fallback
       decisionExtra.textContent = `$${bestResult.last_price.toFixed(2)}`;
     }
 
-// ---------- THRESHOLDS TEXT ----------
     thresholdsText.textContent = `Sell > ${bestResult.sell_pct_thresh.toFixed(
       1
     )}%, Buy drop > ${bestResult.buy_pct_thresh.toFixed(1)}%`;
@@ -3321,7 +3088,6 @@ async function runForInput(
       ` | Huge-range ≥${(bestResult.regime_range_pct ?? REGIME_RANGE_PCT).toFixed(0)}%` +
       ` | Start wallet $${usedStartWallet.toFixed(2)}`;
 
-    // ---------- PROFIT TEXT ----------
     const profit = bestResult.profit;
     const finalValue = bestResult.final_value;
     const profitPct = (profit / usedStartWallet) * 100;
@@ -3338,11 +3104,9 @@ async function runForInput(
       2
     )} (wallet + holdings)`;
 
-    // ---------- SAVE & REFRESH SAVED LIST ----------
     saveBestResult(symbol, bestResult, { mode: modeKey, calcUsed });
     renderSavedList();
 
-    // how long did the whole run take?
     const runEndTime =
       typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
     const ms = runEndTime - runStartTime;
@@ -3363,7 +3127,6 @@ async function runForInput(
 }
 
 
-// ================== EVENT LISTENERS (MAIN) ==================
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const val = input.value || "";
@@ -3375,7 +3138,6 @@ runButton.addEventListener("click", () => {
   runForInput(val);
 });
 
-// --- Reload click timers (so dblclick can cancel the single-click behavior) ---
 const _reloadClickTimers = new Map();
 
 function clearSavedCalculationsForSymbol(symbol) {
@@ -3386,13 +3148,11 @@ function clearSavedCalculationsForSymbol(symbol) {
   const rec = saved[sym];
   if (!rec || typeof rec !== "object") return;
 
-  // Preserve symbol + starred, wipe cached calculations/settings
   const starred = !!rec.starred;
   rec.symbol = sym;
   rec.starred = starred;
   rec.modes = {};
 
-  // Remove top-level compatibility fields so we truly "delete calculations"
   const wipeKeys = [
     "start_wallet",
     "sell_pct_thresh",
@@ -3434,19 +3194,14 @@ function clearPriceCacheForSymbol(symbol) {
       localStorage.setItem(PRICE_CACHE_KEY, JSON.stringify(cache));
     }
   } catch (e) {
-    // ignore
   }
 }
 
 savedList.addEventListener("click", (e) => {
-  // Reload button:
-  // - single click: reuse cached calcs (no forceReoptimize), but still fetch latest prices if cache is stale (getStockData handles this)
-  // - shift+click: force reoptimize (existing behavior)
   const reload = e.target.closest(".saved-reload");
   if (reload) {
     const sym = reload.dataset.symbol;
     if (sym) {
-      // Delay the single-click action to give dblclick a chance to cancel it
       const key = sym.toUpperCase();
       if (_reloadClickTimers.has(key)) {
         clearTimeout(_reloadClickTimers.get(key));
@@ -3465,7 +3220,6 @@ savedList.addEventListener("click", (e) => {
     return;
   }
 
-  // Delete button: remove symbol
   const del = e.target.closest(".saved-delete");
   if (del) {
     const sym = del.dataset.symbol;
@@ -3479,7 +3233,6 @@ savedList.addEventListener("click", (e) => {
     return;
   }
 
-  // Click anywhere else on the row → load + run (using cached thresholds if present)
   const btn = e.target.closest(".saved-btn");
   if (!btn) return;
 
@@ -3488,19 +3241,16 @@ savedList.addEventListener("click", (e) => {
 
   input.value = sym;
 
-  // Prefer whichever mode was last calculated with (so we don't "flip" a stock's results just because the toggle was changed)
   const saved = loadSaved();
   const rec = saved[(sym || "").toUpperCase()];
   let preferredMode = null;
 
   if (rec) {
-    // Primary: last_run_mode (but we also prefer precise if it exists)
     if (rec.modes && rec.modes[MODE_PRECISE]) {
       preferredMode = MODE_PRECISE;
     } else if (rec.last_run_mode === MODE_QUICK || rec.last_run_mode === MODE_PRECISE) {
       preferredMode = rec.last_run_mode;
     } else if (rec.modes) {
-      // Fallback: pick whichever exists (prefer precise if present)
       if (rec.modes[MODE_PRECISE]) preferredMode = MODE_PRECISE;
       else if (rec.modes[MODE_QUICK]) preferredMode = MODE_QUICK;
     }
@@ -3509,7 +3259,6 @@ savedList.addEventListener("click", (e) => {
   runForInput(sym, preferredMode ? { mode: preferredMode } : undefined);
 });
 
-// Double-click reload: clear cached calcs + cached prices, then re-run in the currently selected mode
 savedList.addEventListener("dblclick", (e) => {
   const reload = e.target.closest(".saved-reload");
   if (!reload) return;
@@ -3546,9 +3295,7 @@ if (reloadSavedBtn) {
   });
 }
 
-// ================== SANDBOX: PORTFOLIO PLAYGROUND ==================
 
-// DOM
 const pfStartCashInput = document.getElementById("pf-start-cash");
 const pfStartDateInput = document.getElementById("pf-start-date");
 const pfRowsContainer = document.getElementById("pf-rows");
@@ -3567,7 +3314,6 @@ function pfSetProgress(pct, text) {
   pfProgressText.textContent = text || "";
 }
 
-// create one row
 function pfCreateRow(initialSymbol = "", initialPrice = "", initialAmount = "") {
   if (!pfRowsContainer) return;
 
@@ -3596,7 +3342,6 @@ function pfCreateRow(initialSymbol = "", initialPrice = "", initialAmount = "") 
   pfRowsContainer.appendChild(row);
 }
 
-// read rows
 function pfCollectRows() {
   const rows = [];
   if (!pfRowsContainer) return rows;
@@ -3621,7 +3366,6 @@ function pfCollectRows() {
   return rows;
 }
 
-// manual curve: hold given amounts for each stock + start cash
 function pfBuildManualCurve(dates, priceBySymbol, inputs, startCash) {
   const curve = [];
   for (const date of dates) {
@@ -3639,7 +3383,6 @@ function pfBuildManualCurve(dates, priceBySymbol, inputs, startCash) {
   return curve;
 }
 
-// "Optimized" curve: pick best-performing single stock at each date (idealized)
 function pfBuildOptimizedCurve(dates, priceBySymbol, inputs, startCash) {
   const perSymbolCurves = {};
   for (const inp of inputs) {
@@ -3733,7 +3476,6 @@ function pfUpdateChart(dates, manualCurve, optimizedCurve) {
             }
           }
         },
-        // 👇 new hidden axis for Wallet + Shares
         yHidden: {
           display: false
         }
@@ -3808,7 +3550,6 @@ async function pfRunPortfolioAll() {
     return;
   }
 
-  // intersection of dates
   let commonDates = Array.from(dateSets[0]);
   for (let i = 1; i < dateSets.length; i++) {
     commonDates = commonDates.filter((d) => dateSets[i].has(d));
@@ -3839,7 +3580,6 @@ async function pfRunPortfolioAll() {
   pfSetProgress(100, "Portfolio simulations complete.");
 }
 
-// wire sandbox buttons
 if (pfAddRowBtn && pfRowsContainer) {
   pfAddRowBtn.addEventListener("click", () => {
     pfCreateRow();
@@ -3855,10 +3595,8 @@ if (pfRunPortfolioBtn) {
   });
 }
 
-// ================== INIT ==================
 renderSavedList();
 
-// Auto-run the top saved symbol (if any) when the page loads
 (function autoRunTopSaved() {
   const firstBtn = savedList.querySelector(".saved-btn");
   if (!firstBtn) return;
@@ -3866,7 +3604,6 @@ renderSavedList();
   const sym = firstBtn.dataset.symbol;
   if (!sym) return;
 
-  // Prefer Precise on startup for the top symbol if it exists
   try {
     const saved = loadSaved();
     const rec = saved[(sym || "").toUpperCase()];
@@ -3879,10 +3616,8 @@ renderSavedList();
       return;
     }
   } catch (e) {
-    // ignore
   }
 
-  // fallback: run with current mode
   input.value = sym;
   runForInput(sym);
 })();
