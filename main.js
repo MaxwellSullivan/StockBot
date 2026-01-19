@@ -2197,6 +2197,7 @@ function saveBestResult(symbol, result, { mode = MODE_PRECISE, calcUsed = "" } =
     if (!sym)
         return;
     const saved = loadSaved();
+    console.log(saved);
     const prev = saved[sym] || {};
     const prevStar = prev.starred || false;
     const modeKey = mode === MODE_QUICK ? MODE_QUICK : MODE_PRECISE;
