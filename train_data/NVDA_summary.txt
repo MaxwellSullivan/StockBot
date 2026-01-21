@@ -1,0 +1,13 @@
+Best free-trading strategy (no monthly/weekly quota)
+
+FreeStrategy(fast=47, slow=77, rsi_w=30, rsi_buy=29.62146358450185, rsi_sell=70.17934523431154, z_w=28, z_buy=-0.7602825534335611, z_sell=1.2524680133445951, stop_loss=0.12418343322587246, take_profit=0.22916640733301008, min_hold=2, max_hold=60, cooldown=1, max_idle=15, fee=0.001, dd_weight=0.75, trade_penalty=0.002)
+
+Score: 0.2867255942334353
+Total return: 126.04086463321231
+CAGR: 0.6240378523959791
+Max drawdown: 0.39769980087151635
+Trades: 195
+Trades/year: 19.518703754453277
+
+Trades CSV: C:\Users\roblo\Desktop\StockBot\train_data\NVDA_best_trades.csv
+Labeled CSV (same filename as input): C:\Users\roblo\Desktop\StockBot\train_data\NVDA.csv
